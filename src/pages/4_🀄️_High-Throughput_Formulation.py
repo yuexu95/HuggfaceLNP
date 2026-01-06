@@ -273,6 +273,41 @@ with st.expander("🎛️ Select Factors to Study", expanded=True):
     
     st.info(f"📊 **Factors Selected: {num_factors}** - Recommended design types based on factor count are highlighted below")
 
+    col_f5, col_f6, col_f7 = st.columns(3)
+    with col_f5:
+        study_helper = st.checkbox("Helper Lipid %", value=False)
+    with col_f6:
+        study_aqueous_ethanol = st.checkbox("Aqueous:Ethanol Ratio", value=False)
+    with col_f7:
+        study_final_volume = st.checkbox("Final LNP Volume (μL)", value=False)
+    
+    # Initialize custom factors
+    if "custom_factors" not in st.session_state:
+        st.session_state.custom_factors = {}
+    
+    st.write("**Custom Factors:**")
+    custom_col1, custom_col2 = st.columns([3, 1])
+    with custom_col1:
+        new_factor = st.text_input("Add custom factor:", placeholder="e.g., Temperature (°C), pH", key="new_custom_factor_input")
+    with custom_col2:
+        if st.button("➕ Add", key="add_custom_factor_btn"):
+            if new_factor and new_factor not in st.session_state.custom_factors:
+                st.session_state.custom_factors[new_factor] = {'active': True}
+                st.rerun()
+    
+    if st.session_state.custom_factors:
+        for factor_name in list(st.session_state.custom_factors.keys()):
+            col_c1, col_c2 = st.columns([3, 1])
+            with col_c1:
+                is_checked = st.checkbox(factor_name, value=st.session_state.custom_factors[factor_name]['active'], key=f"custom_{factor_name}")
+                st.session_state.custom_factors[factor_name]['active'] = is_checked
+            with col_c2:
+                if st.button("🗑️", key=f"del_{factor_name}"):
+                    del st.session_state.custom_factors[factor_name]
+                    st.rerun()
+    
+    custom_active = sum(1 for f in st.session_state.custom_factors.values() if f['active'])
+    num_factors = sum([study_ionizable, study_cholesterol, study_peg, study_ion_dna, study_helper, study_aqueous_ethanol, study_final_volume]) + custom_active
 st.markdown("---")
 
 with st.expander("📏 Define Factor Ranges (Low & High Levels)", expanded=True):
@@ -370,6 +405,18 @@ with st.expander("📏 Define Factor Ranges (Low & High Levels)", expanded=True)
         else:
             st.success(f"✅ **Optimal**: Your ranges are feasible. All 2^n combinations will be valid. Helper range: {min_helper_possible:.1f}% - 100%")
 
+        # Only check lipid constraints if studying lipid factors
+        if any([study_ionizable, study_cholesterol, study_peg, study_helper]):
+            st.markdown("**LNP Composition Constraint**: Ionizable + Cholesterol + PEG + Helper = 100%  |  **Min Helper**: 0.5%")
+        
+            # Calculate feasibility with helper lipid
+            ion_range = factor_ranges.get("Ionizable_%", (45.0, 55.0))
+            chol_range = factor_ranges.get("Cholesterol_%", (33.5, 43.5))
+            peg_range = factor_ranges.get("PEG_%", (0.5, 2.5))
+            max_sum = ion_range[1] + chol_range[1] + peg_range[1]
+            min_helper_possible = 100.0 - max_sum
+        else:
+            st.info("💡 No lipid composition factors selected - skipping lipid constraint validation.")
 st.markdown("---")
 
 st.subheader("🎯 DOE Design Selection")
@@ -420,7 +467,7 @@ with st.container():
         st.markdown("**Experimental Parameters**")
         num_replicates = st.number_input(
             "Number of Replicates:",
-            value=2,
+            value=1,
             min_value=1,
             max_value=10,
             help="Repeat each design point for statistical validation"
@@ -1515,6 +1562,37 @@ PEG:    {run_sheet['PEG_Vol_uL'].min():.1f} → {run_sheet['PEG_Vol_uL'].max():.
 else:
     st.info("👈 **Start with STAGE 1: PLANNING** - Define your DOE objective, response variable, and components to begin the DOE workflow.")
 
+    if study_helper:
+        with range_cols[0]:
+            st.markdown("**Helper Lipid %**")
+            helper_range = st.slider("Range", min_value=0.5, max_value=30.0, value=(5.0, 15.0), step=0.5, label_visibility="collapsed", key="helper_range")
+            factor_ranges["Helper_%"] = helper_range
+    
+    if study_aqueous_ethanol:
+        with range_cols[1]:
+            st.markdown("**Aqueous:Ethanol Ratio**")
+            ae_range = st.slider("Range", min_value=0.5, max_value=3.0, value=(1.0, 2.0), step=0.1, label_visibility="collapsed", key="ae_range")
+            factor_ranges["Aqueous_Ethanol_Ratio"] = ae_range
+    
+    if study_final_volume:
+        with range_cols[0]:
+            st.markdown("**Final LNP Volume (μL)**")
+            fv_range = st.slider("Range", min_value=100.0, max_value=1000.0, value=(200.0, 500.0), step=50.0, label_visibility="collapsed", key="fv_range")
+            factor_ranges["Final_LNP_Volume"] = fv_range
+    
+    # Custom factor ranges
+    if st.session_state.custom_factors:
+        st.markdown("**Custom Factor Ranges:**")
+        for factor_name in st.session_state.custom_factors:
+            if st.session_state.custom_factors[factor_name]['active']:
+                with range_cols[0 if len(list(st.session_state.custom_factors.keys())) % 2 == 1 else 1]:
+                    st.markdown(f"**{factor_name}**")
+                    custom_min = st.number_input(f"{factor_name} Min", value=0.0, step=0.5, label_visibility="collapsed", key=f"custom_min_{factor_name}")
+                    custom_max = st.number_input(f"{factor_name} Max", value=100.0, step=0.5, label_visibility="collapsed", key=f"custom_max_{factor_name}")
+                    factor_ranges[factor_name.replace(" ", "_").replace("(", "").replace(")", "")] = (custom_min, custom_max)
+    
+    # Check feasibility and suggest adjustments
+    st.info("💡 **Tip**: Wider ranges explore more of design space but may include non-functional formulations. Narrow ranges focus on known good regions.")
 st.markdown("---")
 
 # ============================================================================
