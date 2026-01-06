@@ -273,14 +273,6 @@ with st.expander("🎛️ Select Factors to Study", expanded=True):
     
     st.info(f"📊 **Factors Selected: {num_factors}** - Recommended design types based on factor count are highlighted below")
 
-    col_f5, col_f6, col_f7 = st.columns(3)
-    with col_f5:
-        study_helper = st.checkbox("Helper Lipid %", value=False)
-    with col_f6:
-        study_aqueous_ethanol = st.checkbox("Aqueous:Ethanol Ratio", value=False)
-    with col_f7:
-        study_final_volume = st.checkbox("Final LNP Volume (μL)", value=False)
-    
     # Initialize custom factors
     if "custom_factors" not in st.session_state:
         st.session_state.custom_factors = {}
@@ -307,7 +299,7 @@ with st.expander("🎛️ Select Factors to Study", expanded=True):
                     st.rerun()
     
     custom_active = sum(1 for f in st.session_state.custom_factors.values() if f['active'])
-    num_factors = sum([study_ionizable, study_cholesterol, study_peg, study_ion_dna, study_helper, study_aqueous_ethanol, study_final_volume]) + custom_active
+    num_factors = sum([study_ionizable, study_cholesterol, study_peg, study_ion_dna]) + custom_active
 st.markdown("---")
 
 with st.expander("📏 Define Factor Ranges (Low & High Levels)", expanded=True):
@@ -406,7 +398,7 @@ with st.expander("📏 Define Factor Ranges (Low & High Levels)", expanded=True)
             st.success(f"✅ **Optimal**: Your ranges are feasible. All 2^n combinations will be valid. Helper range: {min_helper_possible:.1f}% - 100%")
 
         # Only check lipid constraints if studying lipid factors
-        if any([study_ionizable, study_cholesterol, study_peg, study_helper]):
+        if any([study_ionizable, study_cholesterol, study_peg]):
             st.markdown("**LNP Composition Constraint**: Ionizable + Cholesterol + PEG + Helper = 100%  |  **Min Helper**: 0.5%")
         
             # Calculate feasibility with helper lipid
@@ -1040,6 +1032,10 @@ if "run_sheet" in st.session_state:
     design_display = design_df.copy()
     design_display["Helper_%"] = 100.0 - design_display["Ionizable_%"] - design_display["Cholesterol_%"] - design_display["PEG_%"]
     
+    # Display number of design points
+    num_design_points = len(design_display)
+    st.info(f"📍 **Total Design Points: {num_design_points}**")
+    
     st.dataframe(
         design_display.round(2),
         use_container_width=True,
@@ -1090,92 +1086,125 @@ if "run_sheet" in st.session_state:
     # This ensures 3D visualization matches the actual Design Matrix
     design_for_viz = design_display.copy()
     
-    # 3D Molar Ratio Space: Ionizable vs Cholesterol vs PEG
-    fig3d_molar = go.Figure(data=[go.Scatter3d(
-        x=design_for_viz["Ionizable_%"],
-        y=design_for_viz["Cholesterol_%"],
-        z=design_for_viz["PEG_%"],
-        mode='markers',
-        marker=dict(
-            size=8,
-            color=design_for_viz["Helper_%"],
-            colorscale='Viridis',
-            showscale=True,
-            colorbar=dict(title="Helper %", x=1.1),
-            line=dict(width=1, color='white'),
-            opacity=0.9
-        ),
-        text=[f"Ion: {i:.1f}%<br>Chol: {c:.1f}%<br>PEG: {p:.1f}%<br>Helper: {h:.1f}%" 
-              for i, c, p, h in zip(design_for_viz["Ionizable_%"], 
-                                   design_for_viz["Cholesterol_%"],
-                                   design_for_viz["PEG_%"],
-                                   design_for_viz["Helper_%"])],
-        hoverinfo='text',
-        name='Design Points'
-    )])
+    # Display number of visualization points matching the Design Matrix
+    st.info(f"📍 **Visualizing {len(design_for_viz)} design points** (synchronized with Design Matrix)")
     
-    fig3d_molar.update_layout(
-        title="3D Molar Ratio Design Space",
-        scene=dict(
+    # Create two columns for side-by-side display
+    col_3d, col_bubble = st.columns(2)
+    
+    with col_3d:
+        st.markdown("### 3D Molar Ratio Design Space")
+        
+        # 3D Molar Ratio Space: Ionizable vs Cholesterol vs PEG
+        fig3d_molar = go.Figure(data=[go.Scatter3d(
+            x=design_for_viz["Ionizable_%"],
+            y=design_for_viz["Cholesterol_%"],
+            z=design_for_viz["PEG_%"],
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=design_for_viz["Helper_%"],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title="Helper %", x=1.1),
+                line=dict(width=1, color='white'),
+                opacity=0.9
+            ),
+            text=[f"Ion: {i:.1f}%<br>Chol: {c:.1f}%<br>PEG: {p:.1f}%<br>Helper: {h:.1f}%" 
+                  for i, c, p, h in zip(design_for_viz["Ionizable_%"], 
+                                       design_for_viz["Cholesterol_%"],
+                                       design_for_viz["PEG_%"],
+                                       design_for_viz["Helper_%"])],
+            hoverinfo='text',
+            name='Design Points'
+        )])
+        
+        fig3d_molar.update_layout(
+            scene=dict(
+                xaxis_title="Ionizable Lipid (%)",
+                yaxis_title="Cholesterol (%)",
+                zaxis_title="PEG-Lipid (%)",
+                xaxis=dict(
+                    range=[design_display["Ionizable_%"].min() - 2, design_display["Ionizable_%"].max() + 2]
+                ),
+                yaxis=dict(
+                    range=[design_display["Cholesterol_%"].min() - 2, design_display["Cholesterol_%"].max() + 2]
+                ),
+                zaxis=dict(
+                    range=[design_display["PEG_%"].min() - 2, design_display["PEG_%"].max() + 2]
+                ),
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.3)
+                )
+            ),
+            height=600,
+            hovermode='closest',
+            showlegend=False,
+            margin=dict(l=0, r=0, t=20, b=0)
+        )
+        
+        st.plotly_chart(fig3d_molar, use_container_width=True)
+    
+    with col_bubble:
+        st.markdown("### Response Surface Heatmap")
+        
+        # Bubble Chart: Helper Percentage vs Ionizable% and Cholesterol%
+        # Bubble size represents the Helper% value
+        
+        # Create bubble chart data - each row becomes one bubble
+        bubble_data = []
+        for _, row in design_display.iterrows():
+            bubble_data.append({
+                'Ionizable_%': row['Ionizable_%'],
+                'Cholesterol_%': row['Cholesterol_%'],
+                'Helper_%': row['Helper_%']
+            })
+        bubble_df = pd.DataFrame(bubble_data)
+        num_bubbles = len(bubble_df)
+        
+        # Normalize bubble sizes (scale Helper% to reasonable marker sizes)
+        min_helper = bubble_df['Helper_%'].min()
+        max_helper = bubble_df['Helper_%'].max()
+        helper_range = max_helper - min_helper if max_helper > min_helper else 1
+        bubble_sizes = 10 + (bubble_df['Helper_%'] - min_helper) / helper_range * 50  # Size range: 10-60
+        
+        st.info(f"🔵 **Bubbles: {num_bubbles}** (each bubble = 1 design point, size ∝ Helper %)")
+        
+        fig_hm = go.Figure(data=go.Scatter(
+            x=bubble_df['Ionizable_%'],
+            y=bubble_df['Cholesterol_%'],
+            mode='markers',
+            marker=dict(
+                size=bubble_sizes,
+                color=bubble_df['Helper_%'],
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title="Helper (%)"),
+                line=dict(width=1, color='white'),
+                opacity=0.7
+            ),
+            text=[f"Ionizable: {i:.1f}%<br>Cholesterol: {c:.1f}%<br>Helper: {h:.1f}%" 
+                  for i, c, h in zip(bubble_df['Ionizable_%'], bubble_df['Cholesterol_%'], bubble_df['Helper_%'])],
+            hoverinfo='text',
+            name='Design Points'
+        ))
+        
+        # Set axis ranges based on Design Matrix data
+        fig_hm.update_layout(
             xaxis_title="Ionizable Lipid (%)",
             yaxis_title="Cholesterol (%)",
-            zaxis_title="PEG-Lipid (%)",
             xaxis=dict(
                 range=[design_display["Ionizable_%"].min() - 2, design_display["Ionizable_%"].max() + 2]
             ),
             yaxis=dict(
                 range=[design_display["Cholesterol_%"].min() - 2, design_display["Cholesterol_%"].max() + 2]
             ),
-            zaxis=dict(
-                range=[design_display["PEG_%"].min() - 2, design_display["PEG_%"].max() + 2]
-            ),
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.3)
-            )
-        ),
-        height=600,
-        hovermode='closest',
-        showlegend=True
-    )
-    
-    st.plotly_chart(fig3d_molar, use_container_width=True)
-    
-    st.markdown("---")
-    
-    st.subheader("🔬 Response Surface Heatmap")
-    
-    # Heatmap: Helper Percentage vs Ionizable% and Cholesterol%
-    # Use percentage-based helper values (not volumes) for clearer formulation space view
-    pivot_data = design_display.pivot_table(
-        values='Helper_%',
-        index='Cholesterol_%',
-        columns='Ionizable_%',
-        aggfunc='mean'
-    )
-    
-    fig_hm = go.Figure(data=go.Heatmap(
-        z=pivot_data.values,
-        x=pivot_data.columns,
-        y=pivot_data.index,
-        colorscale='Viridis',
-        colorbar=dict(title="Helper (%)")
-    ))
-    
-    # Set axis ranges based on Design Matrix data
-    fig_hm.update_layout(
-        title="Helper %: Ionizable% vs Cholesterol%",
-        xaxis_title="Ionizable Lipid (%)",
-        yaxis_title="Cholesterol (%)",
-        xaxis=dict(
-            range=[design_display["Ionizable_%"].min() - 2, design_display["Ionizable_%"].max() + 2]
-        ),
-        yaxis=dict(
-            range=[design_display["Cholesterol_%"].min() - 2, design_display["Cholesterol_%"].max() + 2]
-        ),
-        height=400
-    )
-    
-    st.plotly_chart(fig_hm, use_container_width=True)
+            height=600,
+            hovermode='closest',
+            margin=dict(l=50, r=50, t=20, b=50)
+        )
+        
+        st.plotly_chart(fig_hm, use_container_width=True)
     
     st.markdown("---")
     
@@ -1562,13 +1591,6 @@ PEG:    {run_sheet['PEG_Vol_uL'].min():.1f} → {run_sheet['PEG_Vol_uL'].max():.
 else:
     st.info("👈 **Start with STAGE 1: PLANNING** - Define your DOE objective, response variable, and components to begin the DOE workflow.")
 
-    
-    if study_aqueous_ethanol:
-        with range_cols[1]:
-            st.markdown("**Aqueous:Ethanol Ratio**")
-            ae_range = st.slider("Range", min_value=0.5, max_value=3.0, value=(1.0, 2.0), step=0.1, label_visibility="collapsed", key="ae_range")
-            factor_ranges["Aqueous_Ethanol_Ratio"] = ae_range
-    
     # Custom factor ranges
     if st.session_state.custom_factors:
         st.markdown("**Custom Factor Ranges:**")
