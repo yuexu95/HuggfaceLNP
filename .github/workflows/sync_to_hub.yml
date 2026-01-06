@@ -2,7 +2,7 @@ name: Sync to Hugging Face hub
 
 on:
   push:
-    branches: [main]  # ⚠️ 请确认你的 GitHub 主分支是 main 还是 master
+    branches: [main]
 
 jobs:
   sync-to-hub:
