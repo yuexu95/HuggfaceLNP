@@ -1086,14 +1086,14 @@ if "run_sheet" in st.session_state:
     # This ensures 3D visualization matches the actual Design Matrix
     design_for_viz = design_display.copy()
     
-    # Display number of visualization points matching the Design Matrix
-    st.info(f"📍 **Visualizing {len(design_for_viz)} design points** (synchronized with Design Matrix)")
-    
     # Create two columns for side-by-side display
     col_3d, col_bubble = st.columns(2)
     
     with col_3d:
         st.markdown("### 3D Molar Ratio Design Space")
+        
+        # Display number of visualization points
+        st.info(f"📍 **Visualizing {len(design_for_viz)} design points** (synchronized with Design Matrix)")
         
         # 3D Molar Ratio Space: Ionizable vs Cholesterol vs PEG
         fig3d_molar = go.Figure(data=[go.Scatter3d(
