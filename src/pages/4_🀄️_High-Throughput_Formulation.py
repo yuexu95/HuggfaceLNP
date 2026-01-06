@@ -1562,23 +1562,12 @@ PEG:    {run_sheet['PEG_Vol_uL'].min():.1f} → {run_sheet['PEG_Vol_uL'].max():.
 else:
     st.info("👈 **Start with STAGE 1: PLANNING** - Define your DOE objective, response variable, and components to begin the DOE workflow.")
 
-    if study_helper:
-        with range_cols[0]:
-            st.markdown("**Helper Lipid %**")
-            helper_range = st.slider("Range", min_value=0.5, max_value=30.0, value=(5.0, 15.0), step=0.5, label_visibility="collapsed", key="helper_range")
-            factor_ranges["Helper_%"] = helper_range
     
     if study_aqueous_ethanol:
         with range_cols[1]:
             st.markdown("**Aqueous:Ethanol Ratio**")
             ae_range = st.slider("Range", min_value=0.5, max_value=3.0, value=(1.0, 2.0), step=0.1, label_visibility="collapsed", key="ae_range")
             factor_ranges["Aqueous_Ethanol_Ratio"] = ae_range
-    
-    if study_final_volume:
-        with range_cols[0]:
-            st.markdown("**Final LNP Volume (μL)**")
-            fv_range = st.slider("Range", min_value=100.0, max_value=1000.0, value=(200.0, 500.0), step=50.0, label_visibility="collapsed", key="fv_range")
-            factor_ranges["Final_LNP_Volume"] = fv_range
     
     # Custom factor ranges
     if st.session_state.custom_factors:
