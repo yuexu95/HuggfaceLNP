@@ -294,77 +294,93 @@ with col_l12:
     )
 
 # ===== Ratio Input Method Selection =====
-st.markdown("**Lipid-to-DNA Ratio Specification**")
-prot_ratio_mode = st.radio(
-    "Select Input Method",
-    ["Mass Ratio (Ion Lipid:DNA)", "N/P Ratio (Ion/pDNA)"],
-    index=0,
-    horizontal=True,
-    key="prot_ratio_mode",
-    help="Choose whether to input Mass Ratio or N/P Ratio (requires ionizable lipid MW and amines per molecule)"
-)
+st.markdown("---")
+st.markdown("### 🎯 Lipid-to-DNA Ratio Specification")
+st.markdown("*Choose your preferred method for defining the lipid-to-DNA ratio in the formulation*")
 
-col_l13_ratio, col_l14_ratio = st.columns(2)
-with col_l13_ratio:
-    if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
+# Create a visually distinct selection box
+ratio_container = st.container()
+with ratio_container:
+    col_radio1, col_radio2 = st.columns([2, 3])
+    with col_radio1:
+        st.markdown("**📊 Select Input Method:**")
+        prot_ratio_mode = st.radio(
+            "Input Method",
+            ["Mass Ratio (Ion Lipid:DNA)", "N/P Ratio (Ion/pDNA)"],
+            index=0,
+            key="prot_ratio_mode",
+            help="Choose whether to input Mass Ratio or N/P Ratio (requires ionizable lipid MW and amines per molecule)",
+            label_visibility="collapsed"
+        )
+    with col_radio2:
+        if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
+            st.info("ℹ️ **N/P Ratio Mode**: Calculate based on nitrogen-to-phosphate ratio. Commonly used in research papers. For SM-102, N/P=8 ≈ Mass Ratio 17:1")
+        else:
+            st.info("ℹ️ **Mass Ratio Mode**: Directly specify the weight ratio of ionizable lipid to DNA (e.g., 10:1 means 10 μg lipid per 1 μg DNA)")
+
+st.markdown("")  # Add spacing
+
+# Show input fields based on selection
+if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
+    col_l13_ratio, col_l14_ratio = st.columns(2)
+    with col_l13_ratio:
         prot_np_ratio = st.number_input(
-            "N/P Ratio (Ion/pDNA)",
+            "🔬 N/P Ratio (Ion/pDNA)",
             min_value=0.0,
             step=0.5,
             value=8.0,
             key="prot_np_ratio",
             help="N/P ratio (similar to Page 2 pDNA formulation). For SM-102, N/P=8 is equivalent to ~Mass Ratio 17:1"
         )
-    else:
-        prot_np_ratio = 0.0  # Placeholder
         
-with col_l14_ratio:
-    if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
+    with col_l14_ratio:
         prot_amines_per_molecule = st.number_input(
-            "Amines per Ionizable Lipid",
+            "⚗️ Amines per Ionizable Lipid Molecule",
             min_value=0.1,
             step=0.1,
             value=1.0,
             key="prot_amines_per_molecule",
             help="Number of tertiary amine groups per ionizable lipid molecule (typically 1.0 for SM-102)"
         )
-    else:
-        ion_lipid_to_dna_mass_ratio = st.number_input(
-            "Ionizable Lipid to DNA Mass Ratio",
-            min_value=0.1,
-            step=0.5,
-            value=10.0,
-            key="prot_ion_to_dna_mass_ratio",
-            help="Mass ratio of ionizable lipid to DNA (e.g., 10:1 means 10 μg lipid per 1 μg DNA)"
-        )
-        prot_amines_per_molecule = 1.0  # Placeholder
+    ion_lipid_to_dna_mass_ratio = 0.0  # Placeholder
+else:
+    ion_lipid_to_dna_mass_ratio = st.number_input(
+        "⚖️ Ionizable Lipid to DNA Mass Ratio",
+        min_value=0.1,
+        step=0.5,
+        value=10.0,
+        key="prot_ion_to_dna_mass_ratio",
+        help="Mass ratio of ionizable lipid to DNA (e.g., 10:1 means 10 μg lipid per 1 μg DNA)"
+    )
+    prot_np_ratio = 0.0  # Placeholder
+    prot_amines_per_molecule = 1.0  # Placeholder
 
-col_l13, col_l14, col_l15 = st.columns(3)
-with col_l13:
-    aq_eth_ratio = st.number_input(
-        "Aqueous to Ethanol Ratio",
-        min_value=0.5,
-        step=0.1,
-        value=3.0,
-        key="prot_aq_eth_ratio",
-        help="Ratio of aqueous phase (DNA-Compound complex) to ethanol phase"
-    )
-with col_l14:
-    # Display selected ratio mode
-    if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
-        st.metric("Selected Mode", "N/P Ratio")
-    else:
-        st.metric("Selected Mode", "Mass Ratio")
-with col_l15:
-    # Auto-calculate based on Page 2 logic: final_lnp_volume = nucleic_acid_scale / 0.1
-    # nucleic_acid_scale is comp_dna_amount (in μg)
-    suggested_final_volume = comp_dna_amount / 0.1
-    st.metric(
-        "Target Final LNP Volume (μL)",
-        f"{suggested_final_volume:.2f}",
-        help=f"Auto-calculated: {comp_dna_amount:.2f} μg ÷ 0.1 = {suggested_final_volume:.2f} μL"
-    )
-    final_lnp_volume_target = suggested_final_volume
+# Auto-calculate final volume
+suggested_final_volume = comp_dna_amount / 0.1
+final_lnp_volume_target = suggested_final_volume
+
+# Display summary info box
+st.markdown("---")
+summary_info = st.container()
+with summary_info:
+    col_info1, col_info2 = st.columns(2)
+    with col_info1:
+        if prot_ratio_mode == "N/P Ratio (Ion/pDNA)":
+            st.info(f"✅ **Selected Mode:** N/P Ratio\n\n📊 **N/P Ratio:** {prot_np_ratio:.2f}\n\n⚗️ **Amines per Lipid:** {prot_amines_per_molecule:.1f}")
+        else:
+            st.info(f"✅ **Selected Mode:** Mass Ratio\n\n⚖️ **Mass Ratio:** {ion_lipid_to_dna_mass_ratio:.2f}:1")
+    with col_info2:
+        st.success(f"🎯 **Target Final LNP Volume:** {suggested_final_volume:.2f} μL\n\n📝 Auto-calculated: {comp_dna_amount:.2f} μg DNA ÷ 0.1 = {suggested_final_volume:.2f} μL")
+
+st.markdown("### 🌊 Mixing Parameters")
+aq_eth_ratio = st.number_input(
+    "⚗️ Aqueous to Ethanol Ratio",
+    min_value=0.5,
+    step=0.1,
+    value=3.0,
+    key="prot_aq_eth_ratio",
+    help="Ratio of aqueous phase (DNA-Compound complex) to ethanol phase"
+)
 
 # ========== Calculate Multi-step LNP ==========
 if st.button("🧬 Calculate Multi-step LNP Formulation", key="calc_protamine", use_container_width=True):
