@@ -2,9 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import itertools
 from datetime import datetime
 from io import BytesIO
+import ternary
+import matplotlib.pyplot as plt
+from matplotlib import cm
 
 st.set_page_config(page_title="LNP-Flow: Professional DOE Designer", page_icon="🀄", layout="wide")
 
@@ -36,46 +40,37 @@ st.header("📋 STAGE 1: PLANNING - Problem Definition & Factor Identification")
 
 st.markdown("""
 ### DOE Planning Phase
-In this stage, we:
-1. **Understand the problem** - Define LNP formulation objectives
-2. **Identify responses** - What will we measure? (e.g., transfection efficiency, expression level)
-3. **Determine factors** - Which formulation parameters could affect the response?
+**Objective**: Systematic optimization of LNP formulation through Design of Experiments
 
-#### Common Factors for LNP Optimization:
-- **Ionizable Lipid %** - Primary driver of transfection
-- **Cholesterol %** - Affects membrane rigidity and stability
-- **PEG-Lipid %** - Influences circulation time and cellular uptake
-- **Ionizable:DNA Ratio** - Critical for complexation and charge balance
+**Steps**: Define objectives → Identify response variables → Determine key factors
+
+#### Key Paper Insights:
+⚠️ **In vitro ≠ In vivo efficacy** - Build separate models for each
+- Ionizable Lipid %: 30-50% (primary driver)
+- Helper Lipid % (DOPE/DOPC): 10-20%
+- Cholesterol %: 35-50% (stability critical)
+- PEG-Lipid %: 1-5% (**1% optimal**)
+- Ionizable:DNA Ratio: 5-15
+
+**Constraint**: Ionizable + Helper + Cholesterol + PEG = 100%
 """)
 
-with st.expander("🎯 Define DOE Objective", expanded=True):
-    objective = st.selectbox(
-        "What is your primary DOE objective?",
-        options=[
-            "Response Surface: Map detailed interaction effects",
-            "Screening: Identify key factors from many candidates",
-            "Optimization: Optimize known key factors",
-            "Mixture: Optimize component ratios"
-        ],
-        help="Choose the DOE strategy based on your research stage"
-    )
-    
-    response_variable = st.selectbox(
-        "What is your response variable (outcome to measure)?",
-        options=[
-            "Transfection Efficiency (%)",
-            "Gene Expression Level (fold-change)",
-            "Cell Viability (%)",
-            "Particle Size (nm)",
-            "Cellular Uptake (%)",
-            "Protein Production (ng/mL)",
-            "Other (custom)"
-        ],
-        help="The measured outcome that depends on formulation parameters"
-    )
-    
-    if response_variable == "Other (custom)":
-        response_variable = st.text_input("Enter custom response variable name:")
+response_variable = st.selectbox(
+    "Response Variable:",
+    options=[
+        "Transfection Efficiency (%)",
+        "Gene Expression Level (fold-change)",
+        "Cell Viability (%)",
+        "Particle Size (nm)",
+        "Cellular Uptake (%)",
+        "Protein Production (ng/mL)",
+        "Other (custom)"
+    ]
+)
+
+if response_variable == "Other (custom)":
+    response_variable = st.text_input("Enter custom response variable name:")
+objective = "Response Surface"  # Default objective
 
 st.markdown("---")
 
@@ -154,17 +149,15 @@ with st.expander("📦 Lipid Components Configuration", expanded=False):
             "DNA Scale (μg)",
             value=3.0,
             step=0.1,
-            key="dna_mass_ug",
-            help="The minimum volume for pDNA-LNP should be 30 μL, otherwise pipetting errors may occur."
+            key="dna_mass_ug"
         )
     
     with dna_col2:
         dna_concentration = st.number_input(
-            "DNA Stock Concentration (μg/μL)",
+            "DNA Stock (μg/μL)",
             value=1.0,
             step=0.01,
-            key="dna_conc",
-            help="DNA stock solution concentration"
+            key="dna_conc"
         )
 
 st.markdown("---")
@@ -206,27 +199,24 @@ st.subheader("Additional Parameters")
 col_add1, col_add2, col_add3 = st.columns(3)
 with col_add1:
     ionizable_lipid_to_dna_ratio = st.number_input(
-        "Ionizable Lipid to DNA Ratio",
-        value=5.0,
+        "Ion:DNA Mass Ratio",
+        value=10.0,
         step=0.1,
-        key="ion_dna_ratio_param",
-        help="μg ionizable lipid per μg DNA"
+        key="ion_dna_ratio_param"
     )
 with col_add2:
     aqueous_to_ethanol_ratio = st.number_input(
-        "Aqueous to Ethanol Ratio",
+        "Aqueous:Ethanol",
         value=3.0,
         step=0.1,
-        key="aqueous_ethanol_ratio",
-        help="Volume ratio of aqueous to ethanol phase"
+        key="aqueous_ethanol_ratio"
     )
 with col_add3:
     amines_per_molecule = st.number_input(
-        "Amines per Ionizable Lipid Molecule",
+        "Amines/Lipid",
         value=1.0,
         step=0.1,
-        key="amines_per_molecule",
-        help="Number of ionizable amine groups per lipid"
+        key="amines_per_molecule"
     )
 
 
@@ -239,180 +229,113 @@ st.markdown("---")
 st.header("🔍 STAGE 2: SCREENING - Factor Selection & Range Definition")
 
 st.markdown("""
-### Factor Screening Phase
-In this stage, we:
-1. **Select study factors** - Which parameters will we vary?
-2. **Define factor ranges** - What are the practical limits for each factor?
-3. **Choose experimental design** - How many runs do we need?
-
-#### Selection Guidance:
-- **Few factors (2-4)?** → Use **Full Factorial or Optimization designs** (detailed exploration)
-- **Many factors (5+)?** → Use **Screening designs** (Plackett-Burman, Fractional Factorial)
-- **Response surface needed?** → Use **Box-Behnken or Central Composite**
-- **Mixture optimization?** → Use **Mixture Design** (component ratios)
+**Steps**: (1) Select factors → (2) Define ranges → (3) Choose design
+- 2-4 factors: Full Factorial | 5+ factors: Screening Design | Mixture: Mixture Design
 """)
 
 with st.expander("🎛️ Select Factors to Study", expanded=True):
-    st.write("Choose which factors will be varied in this DOE:")
-    
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    
+    col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
         study_ionizable = st.checkbox("Ionizable Lipid %", value=True)
     with col_f2:
         study_cholesterol = st.checkbox("Cholesterol %", value=True)
     with col_f3:
-        study_peg = st.checkbox("PEG-DMG2000 %", value=True)
-    with col_f4:
-        study_ion_dna = st.checkbox("Ion:DNA Mass Ratio", value=True)
+        study_ion_dna = st.checkbox("Ion:DNA Ratio", value=True)
     
-    num_factors = sum([study_ionizable, study_cholesterol, study_peg, study_ion_dna])
+    study_peg = False
+    num_factors = sum([study_ionizable, study_cholesterol, study_ion_dna])
     
     if num_factors < 2:
-        st.warning("⚠️ Select at least 2 factors for meaningful DOE")
-    
-    st.info(f"📊 **Factors Selected: {num_factors}** - Recommended design types based on factor count are highlighted below")
-
-    # Initialize custom factors
+        st.warning("⚠️ Select at least 2 factors")
+    st.info(f"📊 Factors: {num_factors}")
+    # --- Customized Factors ---
+    # Initialize store
     if "custom_factors" not in st.session_state:
         st.session_state.custom_factors = {}
-    
-    st.write("**Custom Factors:**")
+
+    st.markdown("**Customized Factors:**")
     custom_col1, custom_col2 = st.columns([3, 1])
     with custom_col1:
-        new_factor = st.text_input("Add custom factor:", placeholder="e.g., Temperature (°C), pH", key="new_custom_factor_input")
+        new_factor = st.text_input(
+            "Add custom factor:",
+            placeholder="e.g., Temperature (°C), pH",
+            key="new_custom_factor_input"
+        )
     with custom_col2:
         if st.button("➕ Add", key="add_custom_factor_btn"):
             if new_factor and new_factor not in st.session_state.custom_factors:
-                st.session_state.custom_factors[new_factor] = {'active': True}
+                st.session_state.custom_factors[new_factor] = {"active": True}
                 st.rerun()
-    
+
+    # List current custom factors with toggle + delete
     if st.session_state.custom_factors:
         for factor_name in list(st.session_state.custom_factors.keys()):
             col_c1, col_c2 = st.columns([3, 1])
             with col_c1:
-                is_checked = st.checkbox(factor_name, value=st.session_state.custom_factors[factor_name]['active'], key=f"custom_{factor_name}")
-                st.session_state.custom_factors[factor_name]['active'] = is_checked
+                is_checked = st.checkbox(
+                    factor_name,
+                    value=st.session_state.custom_factors[factor_name]["active"],
+                    key=f"custom_{factor_name}"
+                )
+                st.session_state.custom_factors[factor_name]["active"] = is_checked
             with col_c2:
                 if st.button("🗑️", key=f"del_{factor_name}"):
                     del st.session_state.custom_factors[factor_name]
                     st.rerun()
-    
-    custom_active = sum(1 for f in st.session_state.custom_factors.values() if f['active'])
-    num_factors = sum([study_ionizable, study_cholesterol, study_peg, study_ion_dna]) + custom_active
+
+    # Recompute factor count including active customized factors
+    custom_active = sum(
+        1 for f in st.session_state.custom_factors.values() if f.get("active")
+    )
+    num_factors = sum([study_ionizable, study_cholesterol, study_ion_dna]) + custom_active
+
 st.markdown("---")
 
-with st.expander("📏 Define Factor Ranges (Low & High Levels)", expanded=True):
-    st.write("Specify the minimum and maximum values for each factor:")
-    
+with st.expander("📏 Define Factor Ranges", expanded=True):
     factor_ranges = {}
-    
-    # Get predefined PEG range (constant for initial calculation)
-    peg_range_default = (0.5, 2.5)
+    peg_range_default = (1.0, 2.0)
     ion_dna_range_default = (5.0, 15.0)
-    min_helper_target = 0.5
     
-    # Initial slider values
     range_cols = st.columns(2)
-    
     if study_ionizable:
         with range_cols[0]:
             st.markdown("**Ionizable Lipid %**")
-            ion_min = st.slider("Range", min_value=30.0, max_value=70.0, value=(45.0, 55.0), step=0.5, label_visibility="collapsed", key="ion_range")
+            ion_min = st.slider("Range", min_value=30.0, max_value=70.0, value=(45.0, 53.0), step=0.5, label_visibility="collapsed", key="ion_range")
             factor_ranges["Ionizable_%"] = ion_min
     
     if study_cholesterol:
         with range_cols[1]:
             st.markdown("**Cholesterol %**")
-            chol_range = st.slider("Range", min_value=20.0, max_value=50.0, value=(33.5, 43.5), step=0.5, label_visibility="collapsed", key="chol_range")
+            chol_range = st.slider("Range", min_value=20.0, max_value=50.0, value=(30.0, 38.0), step=0.5, label_visibility="collapsed", key="chol_range")
             factor_ranges["Cholesterol_%"] = chol_range
     
-    if study_peg:
-        with range_cols[0]:
-            st.markdown("**PEG-DMG2000 %**")
-            peg_range = st.slider("Range", min_value=0.1, max_value=5.0, value=(0.5, 2.5), step=0.1, label_visibility="collapsed", key="peg_range")
-            factor_ranges["PEG_%"] = peg_range
-    else:
-        factor_ranges["PEG_%"] = peg_range_default
+    factor_ranges["PEG_%"] = peg_range_default
     
     if study_ion_dna:
         with range_cols[1]:
-            st.markdown("**Ionizable:DNA Ratio (μg/μg)**")
+            st.markdown("**Ion:DNA Ratio**")
             ion_dna_range = st.slider("Range", min_value=1.0, max_value=20.0, value=(5.0, 15.0), step=0.5, label_visibility="collapsed", key="ion_dna_range")
             factor_ranges["Ion_DNA_Ratio"] = ion_dna_range
     else:
         factor_ranges["Ion_DNA_Ratio"] = ion_dna_range_default
-    
-    # Check feasibility and suggest adjustments
-    st.info("💡 **Tip**: Wider ranges explore more of design space but may include non-functional formulations. Narrow ranges focus on known good regions.")
-    
-    with st.expander("🔧 Smart Range Optimizer", expanded=True):
-        st.markdown("**LNP Composition Constraint**: Ionizable + Cholesterol + PEG + Helper = 100%  |  **Min Helper**: 0.5%")
-        
-        # Get the selected ranges
-        ion_range = factor_ranges.get("Ionizable_%", (45.0, 55.0))
-        chol_range = factor_ranges.get("Cholesterol_%", (33.5, 43.5))
-        peg_range = factor_ranges.get("PEG_%", (0.5, 2.5))
-        
-        # Calculate feasibility
-        max_sum = ion_range[1] + chol_range[1] + peg_range[1]
-        min_helper_possible = 100.0 - max_sum
-        
-        col_opt1, col_opt2, col_opt3 = st.columns(3)
-        with col_opt1:
-            st.metric("Max Sum", f"{max_sum:.1f}%", delta=f"{100.0 - max_sum:.1f}% Helper")
-        with col_opt2:
-            feasible_status = "✅ Feasible" if max_sum <= 99.5 else "❌ Infeasible"
-            st.metric("Status", feasible_status)
-        with col_opt3:
-            filtered_points = "All Points" if max_sum <= 99.5 else "Filtered"
-            st.metric("Design Points", filtered_points)
-        
-        # If infeasible, suggest optimal ranges
-        if max_sum > 99.5:
-            st.warning(f"⚠️ **Issue**: Max sum = {max_sum:.1f}% exceeds 99.5% limit. Some design combinations will be filtered out.")
-            
-            col_suggest1, col_suggest2 = st.columns(2)
-            
-            with col_suggest1:
-                st.markdown("**Option 1: Reduce Ionizable Upper Limit**")
-                # Calculate max ionizable that allows all combinations
-                max_ion_suggested = 99.5 - chol_range[1] - peg_range[1]
-                st.info(f"Recommended: Ionizable {ion_range[0]:.1f} → {max_ion_suggested:.1f}% (reduced from {ion_range[1]:.1f}%)")
-            
-            with col_suggest2:
-                st.markdown("**Option 2: Reduce Cholesterol Upper Limit**")
-                # Calculate max cholesterol that allows all combinations
-                max_chol_suggested = 99.5 - ion_range[1] - peg_range[1]
-                st.info(f"Recommended: Cholesterol {chol_range[0]:.1f} → {max_chol_suggested:.1f}% (reduced from {chol_range[1]:.1f}%)")
-            
-            st.markdown("**Option 3: Reduce PEG Upper Limit**")
-            max_peg_suggested = 99.5 - ion_range[1] - chol_range[1]
-            st.info(f"Recommended: PEG {peg_range[0]:.1f} → {max_peg_suggested:.1f}% (reduced from {peg_range[1]:.1f}%)")
-            
-            st.markdown("""
-            **Strategy**: The recommended values will allow all 2^n design point combinations to be valid.
-            Choose the factor that is least critical for your research to minimize its upper limit.
-            """)
-        else:
-            st.success(f"✅ **Optimal**: Your ranges are feasible. All 2^n combinations will be valid. Helper range: {min_helper_possible:.1f}% - 100%")
 
-        # Only check lipid constraints if studying lipid factors
-        if any([study_ionizable, study_cholesterol, study_peg]):
-            st.markdown("**LNP Composition Constraint**: Ionizable + Cholesterol + PEG + Helper = 100%  |  **Min Helper**: 0.5%")
-        
-            # Calculate feasibility with helper lipid
-            ion_range = factor_ranges.get("Ionizable_%", (45.0, 55.0))
-            chol_range = factor_ranges.get("Cholesterol_%", (33.5, 43.5))
-            peg_range = factor_ranges.get("PEG_%", (0.5, 2.5))
-            max_sum = ion_range[1] + chol_range[1] + peg_range[1]
-            min_helper_possible = 100.0 - max_sum
-        else:
-            st.info("💡 No lipid composition factors selected - skipping lipid constraint validation.")
+    # Customized factor ranges (numeric)
+    if "custom_factors" in st.session_state and st.session_state.custom_factors:
+        st.markdown("**Custom Factor Ranges**")
+        for factor_name, meta in st.session_state.custom_factors.items():
+            if not meta.get("active"):
+                continue
+            cmin = st.number_input(f"{factor_name} - Min", value=0.0, step=0.1, key=f"{factor_name}_min")
+            cmax = st.number_input(f"{factor_name} - Max", value=1.0, step=0.1, key=f"{factor_name}_max")
+            if cmin >= cmax:
+                st.warning(f"⚠️ {factor_name}: Min should be less than Max")
+            factor_ranges[factor_name] = (float(cmin), float(cmax))
+    
+    st.markdown("**📌 Recommended Ranges**: Ionizable 30-50% | Helper 10-20% | Cholesterol 35-50% | **PEG 1% optimal**")
 st.markdown("---")
 
 st.subheader("🎯 DOE Design Selection")
-st.write("Choose the design type based on your factors and objectives:")
+st.markdown("**Mixture Design Required**: Respects constraint Ionizable + Helper + Cholesterol + PEG = 100%")
 
 with st.container():
     col_design, col_params = st.columns([1.2, 1])
@@ -458,18 +381,16 @@ with st.container():
     with col_params:
         st.markdown("**Experimental Parameters**")
         num_replicates = st.number_input(
-            "Number of Replicates:",
+            "Replicates:",
             value=1,
             min_value=1,
-            max_value=10,
-            help="Repeat each design point for statistical validation"
+            max_value=10
         )
         num_blocks = st.number_input(
-            "Number of Blocks:",
+            "Blocks:",
             value=1,
             min_value=1,
-            max_value=4,
-            help="Divide experiments across different days/batches"
+            max_value=4
         )
         
         st.markdown("**Design Statistics**")
@@ -496,28 +417,15 @@ st.markdown("---")
 # ============================================================================
 
 def normalize_molar_ratios(ionizable_pct, cholesterol_pct, peg_pct):
-    """
-    Normalize three components so that Ionizable + Cholesterol + PEG + Helper = 100%.
-    Returns None if the combination is invalid (would result in negative Helper %).
-    """
+    """Normalize components to sum to 100%."""
     helper_pct = 100.0 - ionizable_pct - cholesterol_pct - peg_pct
-    if helper_pct < 0:
-        return None
-    return ionizable_pct, helper_pct, cholesterol_pct, peg_pct
+    return None if helper_pct < 0 else (ionizable_pct, helper_pct, cholesterol_pct, peg_pct)
 
 
 def filter_valid_design_points(design_df, min_helper_pct=0.5):
-    """
-    Filter DOE design points to ensure all molar ratios are valid.
-    
-    A valid combination requires:
-    Ionizable + Cholesterol + PEG + Helper = 100%
-    And Helper >= min_helper_pct (default 0.5%)
-    
-    This removes points where the sum of Ion + Chol + PEG > 100% - min_helper_pct
-    """
+    """Filter design points: Ion + Chol + PEG + Helper = 100%."""
     if not {"Ionizable_%", "Cholesterol_%", "PEG_%"}.issubset(design_df.columns):
-        return design_df  # If not all columns present, return unchanged
+        return design_df
     
     valid_mask = (
         design_df["Ionizable_%"] + 
@@ -526,18 +434,10 @@ def filter_valid_design_points(design_df, min_helper_pct=0.5):
     ) <= (100.0 - min_helper_pct)
     
     filtered_df = design_df[valid_mask].reset_index(drop=True)
-    
-    # Report filtering results
-    n_original = len(design_df)
-    n_filtered = len(filtered_df)
-    n_removed = n_original - n_filtered
+    n_removed = len(design_df) - len(filtered_df)
     
     if n_removed > 0:
-        st.warning(
-            f"⚠️ **Design Space Constraint**: {n_removed} of {n_original} design points removed "
-            f"because Ionizable + Cholesterol + PEG > 100%. "
-            f"Remaining valid points: {n_filtered}"
-        )
+        st.warning(f"⚠️ {n_removed} points removed (Ion+Chol+PEG > 100%). {len(filtered_df)} valid points remain.")
     
     return filtered_df
 
@@ -702,42 +602,21 @@ def calculate_volumes(
     cholesterol_ratio=38.5,
     pegdmg2000_ratio=1.5
 ):
-    """
-    Convert molar percentages to pipetting volumes using pDNA formulation logic.
-    
-    This function follows the pDNA formulation approach:
-    1. Use ionizable_lipid_to_dna_ratio to calculate ionizable lipid moles
-    2. Scale other lipids based on molar ratios
-    3. Calculate volumes from masses and stock concentrations
-    4. Apply 3:1 aqueous:organic ratio with citrate buffer
-    
-    Input units:
-    - Percentages: molar %
-    - MW: g/mol  
-    - Concentrations: μg/μL (= mg/mL)
-    - DNA mass: μg
-    - DNA concentration: μg/μL (= mg/mL)
-    - ionizable_lipid_to_dna_ratio: μg ionizable per μg DNA
-    - aqueous_to_ethanol_ratio: volume ratio
-    """
-    # Calculate moles of ionizable lipid using the ionizable_lipid_to_dna_ratio
+    """Convert molar percentages to pipetting volumes (pDNA formulation)."""
+    # Calculate ionizable lipid moles from Ion:DNA ratio
     ionizable_lipid_moles = (dna_mass_ug * ionizable_lipid_to_dna_ratio) / mw_ion
     
-    # Calculate moles of each lipid based on their molar ratios
     helper_lipid_moles = ionizable_lipid_moles * helper_lipid_ratio / ionizable_lipid_ratio
     cholesterol_moles = ionizable_lipid_moles * cholesterol_ratio / ionizable_lipid_ratio
     pegdmg2000_moles = ionizable_lipid_moles * pegdmg2000_ratio / ionizable_lipid_ratio
     
-    # Calculate mass of each lipid
     ionizable_lipid_mass = ionizable_lipid_moles * mw_ion
     helper_lipid_mass = helper_lipid_moles * mw_helper
     cholesterol_mass = cholesterol_moles * mw_chol
     pegdmg2000_mass = pegdmg2000_moles * mw_peg
     
-    # Calculate final LNP volume
     final_lnp_volume = dna_mass_ug / 0.1
     
-    # Calculate ethanol phase volume
     ionizable_lipid_volume = ionizable_lipid_mass / conc_ion
     helper_lipid_volume = helper_lipid_mass / conc_helper
     cholesterol_volume = cholesterol_mass / conc_chol
@@ -745,13 +624,11 @@ def calculate_volumes(
     ethanol = final_lnp_volume / (aqueous_to_ethanol_ratio + 1) - ionizable_lipid_volume - helper_lipid_volume - cholesterol_volume - pegdmg2000_volume
     ethanol_phase_volume = ionizable_lipid_volume + helper_lipid_volume + cholesterol_volume + pegdmg2000_volume + ethanol
     
-    # Calculate aqueous phase volume
     aqueous_phase_volume = final_lnp_volume * (aqueous_to_ethanol_ratio / (aqueous_to_ethanol_ratio + 1))
     dna_volume = dna_mass_ug / dna_concentration
     citrate_volume = 0.1 * aqueous_phase_volume
     water_volume = aqueous_phase_volume - dna_volume - citrate_volume
     
-    # Calculate total volume
     total = ionizable_lipid_volume + helper_lipid_volume + cholesterol_volume + pegdmg2000_volume + ethanol + dna_volume + citrate_volume + water_volume
     
     return {
@@ -760,6 +637,7 @@ def calculate_volumes(
         "Chol_Vol_uL": round(cholesterol_volume, 2),
         "PEG_Vol_uL": round(pegdmg2000_volume, 2),
         "Ethanol_Vol_uL": round(ethanol, 2),
+        "Ethanol_Phase_Vol_uL": round(ethanol_phase_volume, 2),
         "DNA_Vol_uL": round(dna_volume, 2),
         "Citrate_Vol_uL": round(citrate_volume, 2),
         "Water_Vol_uL": round(water_volume, 2),
@@ -853,41 +731,117 @@ def generate_run_sheet(design_df, num_replicates, num_blocks, mw_ion, mw_helper,
 
 
 # ============================================================================
+# TERNARY PLOT VISUALIZATION FOR MIXTURE DESIGN
+# ============================================================================
+
+def create_ternary_plot(analysis_data, response_variable, component1='Ionizable_%', 
+                       component2='Cholesterol_%', component3='PEG_%',
+                       label1='Ionizable Lipid %', label2='Cholesterol %', label3='PEG-Lipid %'):
+    """Create ternary plot for mixture design response visualization."""
+    
+    # Prepare data - convert to numeric and filter valid data
+    data_clean = analysis_data.copy()
+    data_clean[component1] = pd.to_numeric(data_clean[component1], errors='coerce')
+    data_clean[component2] = pd.to_numeric(data_clean[component2], errors='coerce')
+    data_clean[component3] = pd.to_numeric(data_clean[component3], errors='coerce')
+    data_clean['Response'] = pd.to_numeric(data_clean['Response'], errors='coerce')
+    
+    # Remove rows with any NaN values
+    data_clean = data_clean[[component1, component2, component3, 'Response']].dropna()
+    
+    if len(data_clean) == 0:
+        return None
+    
+    # Create figure and ternary axis
+    scale = 100
+    figure, tax = ternary.figure(scale=scale)
+    
+    # Draw boundary and gridlines
+    tax.boundary(linewidth=2.0)
+    tax.gridlines(color='gray', multiple=10, linewidth=0.5, alpha=0.3)
+    
+    # Set axis labels
+    tax.left_axis_label(label1, offset=0.14, fontsize=10, fontweight='bold')
+    tax.right_axis_label(label2, offset=0.14, fontsize=10, fontweight='bold')
+    tax.bottom_axis_label(label3, offset=0.14, fontsize=10, fontweight='bold')
+    
+    # Draw ticks
+    tax.ticks(axis='lbr', linewidth=1, multiple=10, offset=0.02, fontsize=8)
+    
+    # Prepare points and values
+    points = [(row[component1], row[component2], row[component3]) 
+              for _, row in data_clean.iterrows()]
+    values = data_clean['Response'].values
+    
+    # Normalize values for color mapping (0-1 range)
+    if len(values) > 0 and (values.max() - values.min()) > 0:
+        values_normalized = (values - values.min()) / (values.max() - values.min())
+    else:
+        values_normalized = np.ones_like(values) * 0.5
+    
+    # Get colormap
+    cmap = cm.get_cmap('RdYlGn')
+    colors = [cmap(v) for v in values_normalized]
+    
+    # Plot scatter points with colors
+    for point, value, color, orig_value in zip(points, values_normalized, colors, values):
+        tax.scatter([point], c=[color], s=150, edgecolors='black', linewidth=1.5, zorder=3)
+        
+        # Add value annotations
+        tax.annotate(f'{orig_value:.1f}', position=point, ha='center', va='center',
+                    color='white', fontweight='bold', fontsize=7, zorder=4)
+    
+    # Clear matplotlib ticks and hide axes
+    tax.clear_matplotlib_ticks()
+    
+    # Add colorbar manually
+    sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=values.min(), vmax=values.max()))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=tax.get_axes(), orientation='right', pad=0.1, fraction=0.046)
+    cbar.set_label(response_variable, fontsize=10, fontweight='bold')
+    
+    return figure
+
+
+# ============================================================================
 # SECTION 3: STAGE 3 - OPTIMIZATION (设计生成与执行)
 # ============================================================================
 
-st.header("⚙️ STAGE 3: OPTIMIZATION - Generate & Execute Experimental Design")
+st.header("⚙️ STAGE 3: OPTIMIZATION - Generate Design & Run Sheet")
 
-st.markdown("""
-### Optimization Phase
-In this stage, we:
-1. **Validate factor ranges** - Check that ranges are feasible (sum to 100%)
-2. **Generate design points** - Create the experimental matrix
-3. **Filter invalid points** - Remove formulations that violate constraints
-4. **Prepare run sheet** - Calculate volumes for lab execution
-""")
+st.markdown("**Steps**: (1) Validate ranges → (2) Generate points → (3) Filter invalid → (4) Calculate volumes")
 
 # Build ranges dictionary from selected factors
 ranges = {}
 if study_ionizable:
-    ion_min, ion_max = factor_ranges.get("Ionizable_%", (45.0, 55.0))
+    ion_min, ion_max = factor_ranges.get("Ionizable_%", (45.0, 53.0))
     ranges["Ionizable_%"] = (ion_min, ion_max)
     
 if study_cholesterol:
-    chol_min, chol_max = factor_ranges.get("Cholesterol_%", (33.5, 43.5))
+    chol_min, chol_max = factor_ranges.get("Cholesterol_%", (30.0, 38.0))
     ranges["Cholesterol_%"] = (chol_min, chol_max)
     
-if study_peg:
-    peg_min, peg_max = factor_ranges.get("PEG_%", (0.5, 2.5))
-    ranges["PEG_%"] = (peg_min, peg_max)
-    
+# PEG is always fixed at 1.5% (not a variable factor)
+ranges["PEG_%"] = (1.5, 1.5)
+
 if study_ion_dna:
-    ion_dna_min, ion_dna_max = factor_ranges.get("Ion_DNA_Ratio", (5.0, 15.0))
+    ion_dna_min, ion_dna_max = factor_ranges.get("Ion_DNA_Ratio", (10.0, 30.0))
     ranges["Ion_DNA_Ratio"] = (ion_dna_min, ion_dna_max)
 
-# Check range validity
+# Include active customized factors into ranges
+if "custom_factors" in st.session_state and st.session_state.custom_factors:
+    for factor_name, meta in st.session_state.custom_factors.items():
+        if not meta.get("active"):
+            continue
+        if factor_name in factor_ranges:
+            cmin, cmax = factor_ranges[factor_name]
+            ranges[factor_name] = (cmin, cmax)
+
+# Check range validity (skip fixed factors like PEG)
 range_valid = True
 for factor_name, (min_val, max_val) in ranges.items():
+    if factor_name == "PEG_%":
+        continue  # Skip validation for fixed PEG value
     if min_val >= max_val:
         st.error(f"❌ Invalid range for {factor_name}: Min ({min_val}) must be less than Max ({max_val})")
         range_valid = False
@@ -1308,6 +1262,9 @@ if "run_sheet" in st.session_state:
         # Store the response data
         st.session_state.response_data = response_df
         
+        # Convert Response column to numeric, handling any string values
+        response_df['Response'] = pd.to_numeric(response_df['Response'], errors='coerce')
+        
         # Count non-null responses
         valid_responses = response_df['Response'].dropna()
         st.info(f"📌 {len(valid_responses)}/{len(run_sheet)} runs have response values entered")
@@ -1344,184 +1301,633 @@ if "run_sheet" in st.session_state:
             
             st.markdown("---")
             st.write("**Run Sheet with Response Values:**")
+            
+            # Build column list dynamically based on what exists in the dataframe
+            cols_to_display = []
+            if 'Run_ID' in analysis_data.columns:
+                cols_to_display.append('Run_ID')
+            if 'Ionizable_%' in analysis_data.columns:
+                cols_to_display.append('Ionizable_%')
+            if 'Cholesterol_%' in analysis_data.columns:
+                cols_to_display.append('Cholesterol_%')
+            if 'PEG_%' in analysis_data.columns:
+                cols_to_display.append('PEG_%')
+            if 'Ion_DNA_Target' in analysis_data.columns:
+                cols_to_display.append('Ion_DNA_Target')
+            if 'NP_Ratio' in analysis_data.columns:
+                cols_to_display.append('NP_Ratio')
+            cols_to_display.append('Response')
+            
             st.dataframe(
-                analysis_data[['Run', 'Ionizable_%', 'Cholesterol_%', 'PEG_%', 'Ion_DNA_Ratio', 'NP_Ratio', 'Response']],
+                analysis_data[cols_to_display],
                 use_container_width=True,
                 height=300
             )
             
-            # Calculate main effects for each factor
             st.markdown("---")
-            st.subheader("🎯 Main Effects Analysis")
+            st.subheader("🔺 Interactive Ternary Plot - Component Ratios vs Response")
             
-            col_effect1, col_effect2, col_effect3 = st.columns(3)
-            
-            # Find which factors are in the design
-            factors_to_analyze = []
-            if study_ionizable:
-                factors_to_analyze.append(('Ionizable_%', 'Ionizable Lipid %'))
-            if study_cholesterol:
-                factors_to_analyze.append(('Cholesterol_%', 'Cholesterol %'))
-            if study_peg:
-                factors_to_analyze.append(('PEG_%', 'PEG-Lipid %'))
-            if study_ion_dna:
-                factors_to_analyze.append(('Ion_DNA_Ratio', 'Ion:DNA Ratio'))
-            
-            # Calculate effect for each factor (difference between high and low levels)
-            effects_dict = {}
-            for col_name, display_name in factors_to_analyze:
-                if col_name in analysis_data.columns:
-                    # Get quartiles to separate high vs low
-                    Q1 = analysis_data[col_name].quantile(0.25)
-                    Q3 = analysis_data[col_name].quantile(0.75)
+            # Create ternary plot if we have the required components
+            try:
+                if 'Ionizable_%' in analysis_data.columns and 'Cholesterol_%' in analysis_data.columns and 'PEG_%' in analysis_data.columns:
+                    # Prepare data for ternary plot
+                    ternary_data = analysis_data[['Ionizable_%', 'Cholesterol_%', 'PEG_%', 'Response']].copy()
+                    ternary_data = ternary_data.dropna()
                     
-                    low_resp = analysis_data[analysis_data[col_name] <= Q1]['Response'].mean()
-                    high_resp = analysis_data[analysis_data[col_name] >= Q3]['Response'].mean()
-                    
-                    effect = high_resp - low_resp
-                    effects_dict[display_name] = {
-                        'effect': effect,
-                        'low_mean': low_resp,
-                        'high_mean': high_resp
-                    }
+                    if len(ternary_data) > 0:
+                        # Calculate factor importance (sensitivity analysis)
+                        ionizable_corr = abs(ternary_data['Ionizable_%'].corr(ternary_data['Response']))
+                        chol_corr = abs(ternary_data['Cholesterol_%'].corr(ternary_data['Response']))
+                        peg_corr = abs(ternary_data['PEG_%'].corr(ternary_data['Response']))
+                        
+                        # Normalize importance scores
+                        importance_scores = {
+                            'Ionizable': ionizable_corr,
+                            'Cholesterol': chol_corr,
+                            'PEG': peg_corr
+                        }
+                        total_importance = sum(importance_scores.values())
+                        if total_importance > 0:
+                            importance_pct = {k: (v / total_importance * 100) for k, v in importance_scores.items()}
+                        else:
+                            importance_pct = {k: 0 for k in importance_scores}
+                        
+                        # Find most important factor
+                        most_important = max(importance_scores, key=importance_scores.get)
+                        
+                        # Display factor importance insights
+                        st.markdown("**📊 Factor Importance Analysis:**")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        # Color code factors based on importance
+                        factor_colors = {
+                            'Ionizable': '🔴' if most_important == 'Ionizable' else '⚪',
+                            'Cholesterol': '🔴' if most_important == 'Cholesterol' else '⚪',
+                            'PEG': '🔴' if most_important == 'PEG' else '⚪'
+                        }
+                        
+                        with col1:
+                            st.metric(
+                                f"{factor_colors['Ionizable']} Ionizable Lipid Impact",
+                                f"{importance_pct['Ionizable']:.1f}%",
+                                delta="Most Important" if most_important == 'Ionizable' else None
+                            )
+                        
+                        with col2:
+                            st.metric(
+                                f"{factor_colors['Cholesterol']} Cholesterol Impact",
+                                f"{importance_pct['Cholesterol']:.1f}%",
+                                delta="Most Important" if most_important == 'Cholesterol' else None
+                            )
+                        
+                        with col3:
+                            st.metric(
+                                f"{factor_colors['PEG']} PEG Impact",
+                                f"{importance_pct['PEG']:.1f}%",
+                                delta="Most Important" if most_important == 'PEG' else None
+                            )
+                        
+                        st.markdown(f"""
+                        **Key Finding:** **{most_important}** is the most critical factor, with **{importance_pct[most_important]:.1f}%** 
+                        of the correlation strength with {response_variable}. This factor should be prioritized in optimization.
+                        """)
+                        
+                        st.markdown("---")
+                        st.markdown("""
+                        **📍 Interactive Ternary Plot - Component Ratios vs Response**
+                        - 🖱️ **Hover**: See detailed information for each run
+                        - 🔍 **Zoom**: Click and drag to zoom into regions of interest
+                        - 📍 **Pan**: Scroll to move around the plot
+                        - 💾 **Save**: Download the plot as PNG from the toolbar
+                        """)
+                        
+                        # Prepare data for interactive Plotly ternary plot
+                        values = ternary_data['Response'].values
+                        
+                        # Normalize values for color mapping (0-1 range)
+                        if len(values) > 0 and (values.max() - values.min()) > 0:
+                            values_normalized = (values - values.min()) / (values.max() - values.min())
+                        else:
+                            values_normalized = np.ones_like(values) * 0.5
+                        
+                        # Create color scale based on RdYlGn (Red=High, Yellow=Mid, Green=Low)
+                        # Reverse it so red is high response
+                        colorscale = [
+                            [0.0, '#1a9850'],    # Green (low)
+                            [0.5, '#ffffbf'],    # Yellow (mid)
+                            [1.0, '#d73027']     # Red (high)
+                        ]
+                        
+                        # Create hover text with rich information
+                        hover_texts = []
+                        for idx, row in ternary_data.iterrows():
+                            helper_pct = 100.0 - row['Ionizable_%'] - row['Cholesterol_%'] - row['PEG_%']
+                            hover_text = (
+                                f"<b>Run #{idx + 1}</b><br>"
+                                f"<b>Component Ratios:</b><br>"
+                                f"  • Ionizable: {row['Ionizable_%']:.1f}%<br>"
+                                f"  • Cholesterol: {row['Cholesterol_%']:.1f}%<br>"
+                                f"  • PEG: {row['PEG_%']:.1f}%<br>"
+                                f"  • Helper: {helper_pct:.1f}%<br>"
+                                f"<b>Response:</b> {row['Response']:.2f}<br>"
+                                f"<i>Click for more details</i>"
+                            )
+                            hover_texts.append(hover_text)
+                        
+                        # Create Plotly ternary plot
+                        fig_ternary = go.Figure(data=[go.Scatterternary(
+                            a=ternary_data['Ionizable_%'].values,
+                            b=ternary_data['Cholesterol_%'].values,
+                            c=ternary_data['PEG_%'].values,
+                            mode='markers+text',
+                            marker=dict(
+                                size=8 + (values_normalized * 12),  # Size varies with response
+                                color=values,  # Color based on response value
+                                colorscale=colorscale,
+                                showscale=True,
+                                colorbar=dict(
+                                    title=f"<b>{response_variable}</b>",
+                                    thickness=15,
+                                    len=0.7,
+                                    x=1.02
+                                ),
+                                line=dict(color='rgba(26, 26, 26, 0.8)', width=1.5),
+                                opacity=0.85
+                            ),
+                            text=[f"{v:.0f}" for v in values],
+                            textposition="middle center",
+                            textfont=dict(size=8, color='white', family='monospace'),
+                            hovertext=hover_texts,
+                            hoverinfo='text',
+                            customdata=np.arange(len(ternary_data)),
+                        )])
+                        
+                        # Update layout for better appearance
+                        fig_ternary.update_layout(
+                            title=dict(
+                                text=f"<b>Component Mixture Design - {response_variable} Response Surface</b><br>" +
+                                     f"<sub>Most Important Factor: <span style='color:#d32f2f'>{most_important}</span></sub>",
+                                font=dict(size=16, color='#1a1a1a', family='sans-serif'),
+                                x=0.5,
+                                xanchor='center'
+                            ),
+                            ternary=dict(
+                                sum=100,
+                                aaxis=dict(
+                                    title="Ionizable Lipid %",
+                                    min=0.01,
+                                    linewidth=2,
+                                    ticks='outside',
+                                    tickfont=dict(size=11, color='#1a1a1a')
+                                ),
+                                baxis=dict(
+                                    title="Cholesterol %",
+                                    min=0.01,
+                                    linewidth=2,
+                                    ticks='outside',
+                                    tickfont=dict(size=11, color='#1a1a1a')
+                                ),
+                                caxis=dict(
+                                    title="PEG %",
+                                    min=0.01,
+                                    linewidth=2,
+                                    ticks='outside',
+                                    tickfont=dict(size=11, color='#1a1a1a')
+                                ),
+                                bgcolor='rgba(240, 240, 245, 0.5)'
+                            ),
+                            hovermode='closest',
+                            height=700,
+                            margin=dict(l=80, r=150, t=120, b=80),
+                            paper_bgcolor='white',
+                            plot_bgcolor='white',
+                            font=dict(family='sans-serif', size=11, color='#1a1a1a'),
+                            showlegend=False
+                        )
+                        
+                        # Add annotations for factor importance
+                        fig_ternary.add_annotation(
+                            text=f"<b>Factor Importance Rankings:</b><br>" +
+                                 f"1️⃣ {most_important}: {importance_pct[most_important]:.1f}%<br>" +
+                                 f"2️⃣ {[k for k in importance_pct.keys() if k != most_important][0]}: {importance_pct[[k for k in importance_pct.keys() if k != most_important][0]]:.1f}%<br>" +
+                                 f"3️⃣ {[k for k in importance_pct.keys() if k != most_important][1]}: {importance_pct[[k for k in importance_pct.keys() if k != most_important][1]]:.1f}%",
+                            xref='paper', yref='paper',
+                            x=0.02, y=0.98,
+                            showarrow=False,
+                            bgcolor='rgba(255, 255, 255, 0.9)',
+                            bordercolor='#d32f2f',
+                            borderwidth=2,
+                            borderpad=10,
+                            font=dict(size=10, family='monospace'),
+                            align='left',
+                            xanchor='left',
+                            yanchor='top'
+                        )
+                        
+                        st.plotly_chart(fig_ternary, use_container_width=True, height=700)
+                        
+                        # Display additional insights
+                        st.markdown("**📈 Response Statistics:**")
+                        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+                        with stats_col1:
+                            st.metric("Max Response", f"{values.max():.2f}", delta_color="off")
+                        with stats_col2:
+                            st.metric("Min Response", f"{values.min():.2f}", delta_color="off")
+                        with stats_col3:
+                            st.metric("Mean Response", f"{values.mean():.2f}", delta_color="off")
+                        with stats_col4:
+                            st.metric("Std Dev", f"{values.std():.2f}", delta_color="off")
+                        
+                    else:
+                        st.warning("No valid data for ternary plot")
+                else:
+                    st.info("Ternary plot requires Ionizable, Cholesterol, and PEG components in the design")
+            except Exception as e:
+                st.warning(f"Could not create ternary plot: {e}")
+                import traceback
+                st.error(traceback.format_exc())
             
-            # Display main effects as a bar chart
-            if effects_dict:
-                effects_values = [abs(v['effect']) for v in effects_dict.values()]
-                effects_names = list(effects_dict.keys())
-                
-                fig_effects = go.Figure(data=[
-                    go.Bar(
-                        x=effects_names,
-                        y=effects_values,
-                        marker=dict(
-                            color=effects_values,
-                            colorscale='RdYlGn',
-                            showscale=True,
-                            colorbar=dict(title="Effect\nMagnitude")
-                        ),
-                        text=[f"{v:.2f}" for v in effects_values],
-                        textposition='auto'
-                    )
-                ])
-                
-                fig_effects.update_layout(
-                    title="Factor Effects on Response (|High - Low|)",
-                    xaxis_title="Factor",
-                    yaxis_title="Effect Magnitude",
-                    height=400,
-                    showlegend=False
-                )
-                
-                st.plotly_chart(fig_effects, use_container_width=True)
-                
-                # Print effects table
-                effects_table_data = []
-                for factor_name, effect_data in effects_dict.items():
-                    effects_table_data.append({
-                        'Factor': factor_name,
-                        'Low Level Mean': f"{effect_data['low_mean']:.2f}",
-                        'High Level Mean': f"{effect_data['high_mean']:.2f}",
-                        'Effect': f"{effect_data['effect']:.2f}"
-                    })
-                
-                st.dataframe(
-                    pd.DataFrame(effects_table_data),
-                    use_container_width=True
-                )
-            
-            # 3D Response Surface Plot
             st.markdown("---")
-            st.subheader("🔮 3D Response Surface Visualization")
+            st.subheader("📊 Comprehensive Factor Analysis & Optimization Summary")
             
-            # Create 3D scatter plot with response as color
-            fig3d_response = go.Figure(data=[go.Scatter3d(
-                x=analysis_data['Ionizable_%'],
-                y=analysis_data['Cholesterol_%'],
-                z=analysis_data['PEG_%'],
-                mode='markers',
-                marker=dict(
-                    size=6,
-                    color=valid_responses.values,  # Color by response value
-                    colorscale='Viridis',
-                    showscale=True,
-                    colorbar=dict(title=response_variable, x=1.1),
-                    line=dict(width=1, color='white'),
-                    opacity=0.85
-                ),
-                text=[f"Ion: {i:.1f}%<br>Chol: {c:.1f}%<br>PEG: {p:.1f}%<br>{response_variable}: {r:.2f}" 
-                      for i, c, p, r in zip(analysis_data['Ionizable_%'], 
-                                           analysis_data['Cholesterol_%'],
-                                           analysis_data['PEG_%'],
-                                           valid_responses.values)],
-                hoverinfo='text',
-                name='Experimental Results'
-            )])
+            # Paper-based guidance
+            st.markdown("""
+            ### Key Findings from Literature Analysis:
+            1. **In Vitro ≠ In Vivo Efficacy**: Transfection efficiency observed in cell culture does NOT correlate with animal model performance
+            2. **Special Cubic Model Required**: Lipid component effects are non-additive (interaction terms A×B×C are essential)
+            3. **PEG Paradox**: Higher PEG reduces particle size but **significantly decreases both pDNA and siRNA efficacy**
+            4. **Recommended pDNA Formulation**: DLin-KC2-DMA : DOPE : Cholesterol : C16-PEG2000 = **39:10:50:1** (mol%)
+            5. **Key Difference**: pDNA prefers **low PEG (1%)** while delivery performance is highly sensitive to cholesterol
+            """)
             
-            fig3d_response.update_layout(
-                title=f"3D Response Surface - {response_variable}",
-                scene=dict(
-                    xaxis_title="Ionizable Lipid (%)",
-                    yaxis_title="Cholesterol (%)",
-                    zaxis_title="PEG-Lipid (%)",
-                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.3))
-                ),
-                height=600,
-                hovermode='closest'
-            )
-            
-            st.plotly_chart(fig3d_response, use_container_width=True)
-            
-            # 2D Response Heatmap for each factor pair
-            st.markdown("---")
-            st.subheader("🔥 2D Response Heatmaps")
-            
-            heatmap_pairs = []
-            if study_ionizable and study_cholesterol:
-                heatmap_pairs.append(('Ionizable_%', 'Cholesterol_%', 'Ionizable % vs Cholesterol %'))
-            if study_ionizable and study_peg:
-                heatmap_pairs.append(('Ionizable_%', 'PEG_%', 'Ionizable % vs PEG %'))
-            if study_ionizable and study_ion_dna:
-                heatmap_pairs.append(('Ionizable_%', 'Ion_DNA_Ratio', 'Ionizable % vs Ion:DNA Ratio'))
-            
-            for x_col, y_col, title in heatmap_pairs:
-                # Create bins for heatmap
-                x_bins = pd.cut(analysis_data[x_col], bins=5)
-                y_bins = pd.cut(analysis_data[y_col], bins=5)
-                
-                heatmap_data = analysis_data.groupby([x_bins, y_bins])['Response'].mean().unstack()
-                
-                if not heatmap_data.empty:
-                    fig_heatmap = go.Figure(data=go.Heatmap(
-                        z=heatmap_data.values,
-                        colorscale='RdYlGn',
-                        hovertemplate='%{z:.2f}<extra></extra>',
-                        colorbar=dict(title=response_variable)
-                    ))
+            # Create comprehensive analysis panel
+            try:
+                if len(valid_responses) > 0 and len(analysis_data) > 0:
+                    # Prepare data for analysis
+                    analysis_clean = analysis_data.copy()
+                    for col in ['Ionizable_%', 'Cholesterol_%', 'PEG_%', 'Helper_%', 'Ion_DNA_Ratio']:
+                        if col in analysis_clean.columns:
+                            analysis_clean[col] = pd.to_numeric(analysis_clean[col], errors='coerce')
+                    analysis_clean['Response'] = pd.to_numeric(analysis_clean['Response'], errors='coerce')
+                    analysis_clean = analysis_clean.dropna()
                     
-                    fig_heatmap.update_layout(
-                        title=f"Response Heatmap: {title}",
-                        xaxis_title=y_col,
-                        yaxis_title=x_col,
-                        height=400
-                    )
+                    if len(analysis_clean) > 0:
+                        # ============ PANEL 1: Factor Importance Ranking ============
+                        st.markdown("### 1️⃣ Factor Importance Ranking")
+                        
+                        st.markdown(
+                            "💡 **Paper Finding**: These linear correlations give first-order approximation, "
+                            "but the true model requires **Special Cubic interactions** (A×B×C terms) "
+                            "to capture non-additive lipid synergistic effects."
+                        )
+                        
+                        # Calculate correlations for all factors (excluding PEG since it's fixed)
+                        factor_correlations = {}
+                        factor_names_display = {}
+                        
+                        if 'Ionizable_%' in analysis_clean.columns:
+                            ion_corr = analysis_clean['Ionizable_%'].corr(analysis_clean['Response'])
+                            factor_correlations['Ionizable Lipid %'] = abs(ion_corr)
+                            factor_names_display['Ionizable Lipid %'] = 'Ionizable_%'
+                        
+                        if 'Cholesterol_%' in analysis_clean.columns:
+                            chol_corr = analysis_clean['Cholesterol_%'].corr(analysis_clean['Response'])
+                            factor_correlations['Cholesterol %'] = abs(chol_corr)
+                            factor_names_display['Cholesterol %'] = 'Cholesterol_%'
+                        
+                        if 'Helper_%' in analysis_clean.columns:
+                            helper_corr = analysis_clean['Helper_%'].corr(analysis_clean['Response'])
+                            factor_correlations['Helper Lipid %'] = abs(helper_corr)
+                            factor_names_display['Helper Lipid %'] = 'Helper_%'
+                        
+                        if 'Ion_DNA_Ratio' in analysis_clean.columns:
+                            ion_dna_corr = analysis_clean['Ion_DNA_Ratio'].corr(analysis_clean['Response'])
+                            factor_correlations['Ion:DNA Ratio'] = abs(ion_dna_corr)
+                            factor_names_display['Ion:DNA Ratio'] = 'Ion_DNA_Ratio'
+                        
+                        # Note: PEG is excluded because it's fixed at 1.5%
+                        
+                        # Sort by importance
+                        sorted_factors = sorted(factor_correlations.items(), key=lambda x: x[1], reverse=True)
+                        factor_names_sorted = [f[0] for f in sorted_factors]
+                        factor_values_sorted = [f[1] for f in sorted_factors]
+                        
+                        # Normalize to 0-100 scale
+                        if max(factor_values_sorted) > 0:
+                            factor_importance_pct = [v / max(factor_values_sorted) * 100 for v in factor_values_sorted]
+                        else:
+                            factor_importance_pct = [0] * len(factor_values_sorted)
+                        
+                        # Create bar chart
+                        fig_importance = go.Figure(data=[
+                            go.Bar(
+                                y=factor_names_sorted,
+                                x=factor_importance_pct,
+                                orientation='h',
+                                marker=dict(
+                                    color=factor_importance_pct,
+                                    colorscale='RdYlGn_r',
+                                    showscale=False,
+                                    line=dict(color='#1a1a1a', width=1.5)
+                                ),
+                                text=[f'{v:.1f}%' for v in factor_importance_pct],
+                                textposition='outside',
+                                hovertemplate='<b>%{y}</b><br>Importance: %{x:.1f}%<extra></extra>'
+                            )
+                        ])
+                        
+                        fig_importance.update_layout(
+                            title='<b>Factor Importance Scores</b><br><sub>Relative importance for response optimization</sub>',
+                            xaxis_title='Importance Score (%)',
+                            yaxis_title='',
+                            height=350,
+                            margin=dict(l=150, r=80, t=100, b=50),
+                            showlegend=False,
+                            font=dict(size=11),
+                            paper_bgcolor='white',
+                            plot_bgcolor='#f8f9fa'
+                        )
+                        
+                        st.plotly_chart(fig_importance, use_container_width=True)
+                        
+                        # ============ PANEL 2: Main Effects Plots ============
+                        st.markdown("### 2️⃣ Factor Main Effects (Influence on Response)")
+                        
+                        num_factors_to_display = min(4, len(factor_names_sorted))
+                        fig_main_effects = make_subplots(
+                            rows=2, cols=2,
+                            subplot_titles=[name for name in factor_names_sorted[:4]],
+                            specs=[[{'type': 'scatter'}, {'type': 'scatter'}],
+                                   [{'type': 'scatter'}, {'type': 'scatter'}]],
+                            horizontal_spacing=0.15,
+                            vertical_spacing=0.15
+                        )
+                        
+                        colors_gradient = ['#d73027', '#fc8d59', '#fee090', '#e0f3f8', '#91bfdb', '#4575b4']
+                        
+                        for idx, factor_name in enumerate(factor_names_sorted[:4]):
+                            row = idx // 2 + 1
+                            col = idx % 2 + 1
+                            factor_col = factor_names_display.get(factor_name)
+                            
+                            if factor_col and factor_col in analysis_clean.columns:
+                                # Sort data for line plot
+                                plot_data = analysis_clean[[factor_col, 'Response']].sort_values(by=factor_col)
+                                
+                                fig_main_effects.add_trace(
+                                    go.Scatter(
+                                        x=plot_data[factor_col],
+                                        y=plot_data['Response'],
+                                        mode='markers+lines',
+                                        name=factor_name,
+                                        marker=dict(
+                                            size=8,
+                                            color=plot_data['Response'],
+                                            colorscale='RdYlGn',
+                                            showscale=False,
+                                            line=dict(color='white', width=1)
+                                        ),
+                                        line=dict(color='rgba(0,0,0,0.3)', width=2),
+                                        hovertemplate=f'<b>{factor_name}</b>: %{{x:.2f}}<br>' +
+                                                     f'{response_variable}: %{{y:.2f}}<extra></extra>'
+                                    ),
+                                    row=row, col=col
+                                )
+                                
+                                fig_main_effects.update_xaxes(title_text=factor_name, row=row, col=col, title_font=dict(size=10))
+                                if col == 1:
+                                    fig_main_effects.update_yaxes(title_text=response_variable, row=row, col=col, title_font=dict(size=10))
+                        
+                        fig_main_effects.update_layout(
+                            title='<b>Main Effects on Response</b><br><sub>How each factor individually affects the outcome</sub>',
+                            height=600,
+                            showlegend=False,
+                            font=dict(size=10),
+                            paper_bgcolor='white',
+                            plot_bgcolor='#f8f9fa'
+                        )
+                        
+                        st.plotly_chart(fig_main_effects, use_container_width=True)
+                        
+                        # ============ PANEL 3: Optimal Formulation Prediction ============
+                        st.markdown("### 3️⃣ 🎯 Optimal Formulation Prediction")
+                        
+                        st.warning(
+                            "⚠️ **Important**: This is based on observed data, not a predictive model. "
+                            "For reliable in vivo predictions, model should have ±25% error tolerance. "
+                            "Always validate with independent experiments!"
+                        )
+                        
+                        # Find best run
+                        best_idx = analysis_clean['Response'].idxmax()
+                        best_response = analysis_clean['Response'].max()
+                        
+                        # Prepare optimal formulation
+                        optimal_formulation = {}
+                        pred_confidence = 0
+                        
+                        if 'Ionizable_%' in analysis_clean.columns:
+                            optimal_formulation['Ionizable Lipid %'] = analysis_clean.loc[best_idx, 'Ionizable_%']
+                        
+                        if 'Cholesterol_%' in analysis_clean.columns:
+                            optimal_formulation['Cholesterol %'] = analysis_clean.loc[best_idx, 'Cholesterol_%']
+                        
+                        if 'PEG_%' in analysis_clean.columns:
+                            optimal_formulation['PEG %'] = analysis_clean.loc[best_idx, 'PEG_%']
+                        
+                        if 'Ion_DNA_Ratio' in analysis_clean.columns:
+                            optimal_formulation['Ion:DNA Ratio'] = analysis_clean.loc[best_idx, 'Ion_DNA_Ratio']
+                        
+                        # Calculate Helper %
+                        ion_val = optimal_formulation.get('Ionizable Lipid %', 0)
+                        chol_val = optimal_formulation.get('Cholesterol %', 0)
+                        peg_val = optimal_formulation.get('PEG %', 1.5)
+                        helper_val = max(0, 100.0 - ion_val - chol_val - peg_val)
+                        optimal_formulation['Helper Lipid %'] = helper_val
+                        
+                        # Calculate confidence based on response distribution
+                        response_std = analysis_clean['Response'].std()
+                        response_mean = analysis_clean['Response'].mean()
+                        if response_std > 0:
+                            pred_confidence = min(100, ((best_response - response_mean) / response_std) * 15 + 70)
+                        else:
+                            pred_confidence = 85
+                        
+                        # Display optimal formulation in cards
+                        st.markdown("**📍 Predicted Optimal Formulation:**")
+                        
+                        opt_col1, opt_col2, opt_col3 = st.columns([2, 2, 1])
+                        
+                        with opt_col1:
+                            st.markdown("**Component Ratios (Molar %):**")
+                            for component, value in optimal_formulation.items():
+                                st.write(f"  • **{component}**: `{value:.2f}%`")
+                        
+                        with opt_col2:
+                            st.markdown("**Expected Performance:**")
+                            st.metric(f"Peak {response_variable}", f"{best_response:.2f}", 
+                                     delta=f"+{best_response - response_mean:.2f} vs. mean")
+                            st.metric("Confidence Level", f"{pred_confidence:.0f}%",
+                                     delta="High" if pred_confidence > 80 else "Medium")
+                        
+                        with opt_col3:
+                            st.markdown("**Statistics:**")
+                            st.write(f"Based on **{len(analysis_clean)}** runs")
+                            st.write(f"Mean: `{response_mean:.2f}`")
+                            st.write(f"Std Dev: `{response_std:.2f}`")
+                        
+                        # ============ PANEL 4: Optimization Recommendations ============
+                        st.markdown("### 4️⃣ 💡 Optimization Recommendations (Based on Paper Findings)")
+                        
+                        # Provide actionable insights
+                        recommendations = []
+                        
+                        # PEG warning based on paper findings
+                        if 'PEG_%' in analysis_clean.columns:
+                            peg_in_optimal = optimal_formulation.get('PEG %', 1.5)
+                            if peg_in_optimal > 2.0:
+                                recommendations.append(
+                                    f"⚠️ **PEG Alert**: Your optimal formulation has {peg_in_optimal:.1f}% PEG. "
+                                    f"**Paper strongly recommends 1% PEG** for in vivo delivery. "
+                                    f"High PEG significantly reduces transfection efficacy!"
+                                )
+                        
+                        # Check top factors
+                        if len(sorted_factors) > 0:
+                            top_factor = sorted_factors[0][0]
+                            top_importance = sorted_factors[0][1]
+                            
+                            recommendations.append(
+                                f"🎯 **Priority Factor**: {top_factor} is the most critical ({factor_importance_pct[0]:.0f}% importance). "
+                                f"Focus optimization efforts on this factor."
+                            )
+                        
+                        # Check response trend
+                        if len(sorted_factors) > 1:
+                            second_factor = sorted_factors[1][0]
+                            recommendations.append(
+                                f"📈 **Secondary Factor**: {second_factor} ({factor_importance_pct[1]:.0f}% importance) should be considered "
+                                f"as a secondary optimization target."
+                            )
+                        
+                        # Suggest next steps based on confidence
+                        if pred_confidence < 75:
+                            recommendations.append(
+                                "⚠️ **Low Confidence Alert**: Consider running more experiments around the optimal region "
+                                "to improve confidence in the prediction."
+                            )
+                        elif pred_confidence > 85:
+                            recommendations.append(
+                                "✅ **High Confidence**: The predicted formulation is strongly supported by the data. "
+                                "Proceed with validation studies."
+                            )
+                        
+                        # Response variability check
+                        cv = (response_std / response_mean * 100) if response_mean > 0 else 0
+                        if cv > 30:
+                            recommendations.append(
+                                f"🔍 **High Variability**: Response variation is {cv:.1f}%. "
+                                "Check for experimental noise or identify additional controlling factors."
+                            )
+                        
+                        # Display recommendations
+                        for i, rec in enumerate(recommendations, 1):
+                            st.markdown(f"**{i}.** {rec}")
+                        
+                        # ============ PANEL 5: Interaction Analysis (if available) ============
+                        if len(factor_names_sorted) >= 2:
+                            st.markdown("### 5️⃣ 🔗 Factor Interactions (2D Response Maps)")
+                            
+                            # Create heatmaps for top 2 factor combinations
+                            factor1_col = factor_names_display.get(factor_names_sorted[0])
+                            factor2_col = factor_names_display.get(factor_names_sorted[1])
+                            
+                            if factor1_col and factor2_col and factor1_col in analysis_clean.columns and factor2_col in analysis_clean.columns:
+                                # Create 2D heatmap
+                                pivot_data = analysis_clean.pivot_table(
+                                    values='Response',
+                                    index=factor2_col,
+                                    columns=factor1_col,
+                                    aggfunc='mean'
+                                )
+                                
+                                if pivot_data is not None and not pivot_data.empty:
+                                    fig_heatmap = go.Figure(data=go.Heatmap(
+                                        z=pivot_data.values,
+                                        x=pivot_data.columns,
+                                        y=pivot_data.index,
+                                        colorscale='RdYlGn',
+                                        text=np.round(pivot_data.values, 1),
+                                        texttemplate='%{text:.1f}',
+                                        textfont={"size": 9},
+                                        colorbar=dict(title=response_variable),
+                                        hovertemplate='<b>%{x:.2f}</b> - <b>%{y:.2f}</b><br>' +
+                                                     f'{response_variable}: %{{z:.2f}}<extra></extra>'
+                                    ))
+                                    
+                                    fig_heatmap.update_layout(
+                                        title=f'<b>Interaction: {factor_names_sorted[0]} vs {factor_names_sorted[1]}</b><br>' +
+                                              '<sub>Response values at different factor combinations</sub>',
+                                        xaxis_title=factor_names_sorted[0],
+                                        yaxis_title=factor_names_sorted[1],
+                                        height=450,
+                                        font=dict(size=11),
+                                        paper_bgcolor='white'
+                                    )
+                                    
+                                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                        
+                        # ============ EXPORT OPTIMAL FORMULATION ============
+                        st.markdown("---")
+                        st.markdown("### 📥 Export Optimization Results")
+                        
+                        col_export1, col_export2 = st.columns(2)
+                        
+                        with col_export1:
+                            if st.button("📋 Copy Optimal Formulation", key="copy_optimal"):
+                                optimal_text = "Optimal LNP Formulation:\n" + "\n".join(
+                                    [f"  {k}: {v:.2f}%" if '%' in k else f"  {k}: {v:.2f}" 
+                                     for k, v in optimal_formulation.items()]
+                                )
+                                optimal_text += f"\n\nExpected {response_variable}: {best_response:.2f}\nConfidence: {pred_confidence:.0f}%"
+                                st.code(optimal_text)
+                        
+                        with col_export2:
+                            # Prepare download data
+                            export_data = pd.DataFrame({
+                                'Component': list(optimal_formulation.keys()),
+                                'Value': list(optimal_formulation.values()),
+                                'Unit': ['%', '%', '%', '%', '%'] if len(optimal_formulation) >= 5 else ['%'] * len(optimal_formulation),
+                                'Performance': [best_response] + ['' for _ in range(len(optimal_formulation)-1)],
+                                'Confidence': [f"{pred_confidence:.0f}%"] + ['' for _ in range(len(optimal_formulation)-1)]
+                            })
+                            
+                            csv_buffer = export_data.to_csv(index=False)
+                            st.download_button(
+                                label="📊 Download Optimization Report",
+                                data=csv_buffer,
+                                file_name="optimal_formulation.csv",
+                                mime="text/csv",
+                                key="download_optimal"
+                            )
                     
-                    st.plotly_chart(fig_heatmap, use_container_width=True)
-        
-        # Export results
-        if export_results and len(valid_responses) > 0:
-            # Create comprehensive analysis report
-            analysis_output = run_sheet.copy()
-            analysis_output['Response'] = valid_responses.values
+            except Exception as e:
+                st.warning(f"Could not complete factor analysis: {e}")
             
-            export_buffer = BytesIO()
-            with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
-                analysis_output.to_excel(writer, sheet_name='Results', index=False)
+            # Export results
+            if export_results and len(valid_responses) > 0:
+                # Create comprehensive analysis report
+                analysis_output = run_sheet.copy()
+                analysis_output['Response'] = valid_responses.values
                 
-                # Statistics summary
-                stats_summary = pd.DataFrame({
-                    'Metric': ['Mean', 'Std Dev', 'Min', 'Max', 'Range', 'Count'],
-                    'Value': [
+                export_buffer = BytesIO()
+                with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
+                    analysis_output.to_excel(writer, sheet_name='Results', index=False)
+                    
+                    # Statistics summary
+                    stats_summary = pd.DataFrame({
+                        'Metric': ['Mean', 'Std Dev', 'Min', 'Max', 'Range', 'Count'],
+                        'Value': [
                         valid_responses.mean(),
                         valid_responses.std(),
                         valid_responses.min(),
@@ -1529,17 +1935,17 @@ if "run_sheet" in st.session_state:
                         valid_responses.max() - valid_responses.min(),
                         len(valid_responses)
                     ]
-                })
-                stats_summary.to_excel(writer, sheet_name='Statistics', index=False)
-            
-            export_buffer.seek(0)
-            st.download_button(
-                label="📥 Download Analysis Report",
-                data=export_buffer.getvalue(),
-                file_name=f"DOE_Analysis_{timestamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+                    })
+                    stats_summary.to_excel(writer, sheet_name='Statistics', index=False)
+                
+                export_buffer.seek(0)
+                st.download_button(
+                    label="📥 Download Analysis Report",
+                    data=export_buffer.getvalue(),
+                    file_name=f"DOE_Analysis_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
     
     st.markdown("---")
     
@@ -1551,14 +1957,12 @@ if "run_sheet" in st.session_state:
         st.markdown("**Design Space Coverage**")
         coverage_text = "**Factor Ranges Explored:**\n\n"
         if study_ionizable:
-            ion_min, ion_max = factor_ranges.get("Ionizable_%", (45.0, 55.0))
+            ion_min, ion_max = factor_ranges.get("Ionizable_%", (45.0, 53.0))
             coverage_text += f"• Ionizable: {ion_min:.1f} → {ion_max:.1f}%\n"
         if study_cholesterol:
-            chol_min, chol_max = factor_ranges.get("Cholesterol_%", (33.5, 43.5))
+            chol_min, chol_max = factor_ranges.get("Cholesterol_%", (30.0, 38.0))
             coverage_text += f"• Cholesterol: {chol_min:.1f} → {chol_max:.1f}%\n"
-        if study_peg:
-            peg_min, peg_max = factor_ranges.get("PEG_%", (0.5, 2.5))
-            coverage_text += f"• PEG: {peg_min:.1f} → {peg_max:.1f}%\n"
+        coverage_text += f"• PEG: 1.5% (fixed)\n"
         if study_ion_dna:
             ion_dna_min, ion_dna_max = factor_ranges.get("Ion_DNA_Ratio", (5.0, 15.0))
             coverage_text += f"• Ion:DNA: {ion_dna_min:.1f} → {ion_dna_max:.1f} μg/μg"
@@ -1596,7 +2000,8 @@ else:
         st.markdown("**Custom Factor Ranges:**")
         for factor_name in st.session_state.custom_factors:
             if st.session_state.custom_factors[factor_name]['active']:
-                with range_cols[0 if len(list(st.session_state.custom_factors.keys())) % 2 == 1 else 1]:
+                custom_cols = st.columns(2)
+                with custom_cols[0 if len(list(st.session_state.custom_factors.keys())) % 2 == 1 else 1]:
                     st.markdown(f"**{factor_name}**")
                     custom_min = st.number_input(f"{factor_name} Min", value=0.0, step=0.5, label_visibility="collapsed", key=f"custom_min_{factor_name}")
                     custom_max = st.number_input(f"{factor_name} Max", value=100.0, step=0.5, label_visibility="collapsed", key=f"custom_max_{factor_name}")
@@ -1604,123 +2009,3 @@ else:
     
     # Check feasibility and suggest adjustments
     st.info("💡 **Tip**: Wider ranges explore more of design space but may include non-functional formulations. Narrow ranges focus on known good regions.")
-st.markdown("---")
-
-# ============================================================================
-# DATA ANALYSIS & VERIFICATION GUIDANCE
-# ============================================================================
-
-with st.expander("📊 Data Analysis & Verification Guide", expanded=False):
-    st.markdown("""
-    ### Next Steps After Running Experiments
-    
-    #### 1. **Data Collection & Input**
-    - Record response variable measurements for each experimental run
-    - Enter data into the run sheet
-    - Check for outliers or failed experiments
-    
-    #### 2. **Statistical Analysis** (ANOVA, Regression)
-    - **Screening designs** → Use effect screening to identify significant factors
-    - **Optimization designs** → Use response surface methodology to find optima
-    - **Multi-response** → Use desirability functions to optimize multiple responses simultaneously
-    
-    #### 3. **Factor Effect Analysis**
-    - **Main effects plots** - Show average effect of each factor
-    - **Interaction plots** - Show how factors combine to affect response
-    - **Pareto charts** - Rank factors by effect magnitude
-    
-    #### 4. **Model Development**
-    ```
-    Response = f(Factor1, Factor2, Factor3, ...) + Interactions + Error
-    ```
-    
-    #### 5. **Validation & Confirmation**
-    - **Confirmation experiments** - Run predicted optimal condition
-    - **Robustness testing** - Test near optimum to ensure stability
-    - **Comparison with baseline** - Measure improvement over current formulation
-    
-    #### 6. **Success Criteria**
-    Define before the experiment:
-    - Minimum acceptable response improvement
-    - Formulation stability requirements
-    - Manufacturing feasibility constraints
-    """)
-
-st.markdown("---")
-
-# ============================================================================
-# HELP & DOCUMENTATION
-# ============================================================================
-
-with st.expander("❓ DOE Workflow Reference - Based on numiqo Standards"):
-    st.markdown("""
-    ### The Complete DOE Process (Planning → Screening → Optimization → Verification)
-    
-    This tool implements the professional DOE workflow:
-    
-    #### 🎯 **STAGE 1: PLANNING - Problem Definition**
-    
-    - Clearly define experimental objective (screening, optimization, response surface)
-    - Identify response variable (what will we measure?)
-    - Determine potential factors that could influence response
-    - Estimate practical constraints
-    
-    #### 🔍 **STAGE 2: SCREENING - Factor Selection & Range Definition**
-    
-    - Select which factors to study
-    - Define feasible ranges for each factor
-    - Choose appropriate experimental design based on factor count:
-    
-    | Scenario | Recommended Design | Typical Runs |
-    |----------|------------------|-------------|
-    | 2-3 factors, exploratory | Full Factorial 2-Level | 8-16 |
-    | 2-3 factors, detailed | Full Factorial 3-Level | 27-81 |
-    | 4-5 factors, cost-sensitive | Fractional Factorial | 8-32 |
-    | 5+ factors, screening | Plackett-Burman | 12-20 |
-    | 3-4 factors, response surface | Box-Behnken | 15-45 |
-    | Comprehensive analysis | Central Composite | 20-50 |
-    | Component optimization | Mixture Design | 10-30 |
-    
-    #### ⚙️ **STAGE 3: OPTIMIZATION - Design Execution**
-    
-    - Generate experimental design matrix
-    - Prepare lab protocols with precise volumes
-    - Execute experiments in randomized order
-    - Collect accurate response measurements
-    
-    This tool provides:
-    - Design matrix with all factor combinations
-    - Lab-ready run sheet with exact pipetting volumes
-    - N/P ratio calculations
-    - Helper lipid validation
-    
-    #### ✅ **STAGE 4: VERIFICATION - Analysis & Conclusions**
-    
-    - Analyze results using ANOVA and regression
-    - Identify significant factors and interactions
-    - Determine optimal factor settings
-    - Validate with confirmation experiments
-    
-    **Deliverables:**
-    - Regression equation: Response = f(Factors)
-    - Optimal settings with predicted response
-    - Process capability assessment
-    
-    ---
-    
-    ### 📋 **LNP-Specific Considerations**
-    
-    **Constraint:** Ionizable + Helper + Cholesterol + PEG = 100%
-    - Creates mixture design scenario
-    - Helper = 100 - Ion - Chol - PEG
-    
-    **Key Parameters:**
-    - **Ionizable Lipid (%)** - Primary driver of transfection
-    - **Cholesterol (%)** - Membrane stability
-    - **PEG-Lipid (%)** - Circulation time
-    - **Ion:DNA Ratio** - Charge balance
-    
-    **References:**
-    - numiqo.com/tutorial/design-of-experiments
-    - Box, Hunter & Hunter (1978) - Statistics for Experimenters
-    """)
