@@ -296,7 +296,7 @@ with st.expander("📏 Define Factor Ranges", expanded=True):
     peg_range_default = (1.0, 2.0)
     ion_dna_range_default = (5.0, 15.0)
     
-    range_cols = st.columns(2)
+    range_cols = st.columns(3)
     if study_ionizable:
         with range_cols[0]:
             st.markdown("**Ionizable Lipid %**")
@@ -312,7 +312,7 @@ with st.expander("📏 Define Factor Ranges", expanded=True):
     factor_ranges["PEG_%"] = peg_range_default
     
     if study_ion_dna:
-        with range_cols[1]:
+        with range_cols[2]:
             st.markdown("**Ion:DNA Ratio**")
             ion_dna_range = st.slider("Range", min_value=1.0, max_value=20.0, value=(5.0, 15.0), step=0.5, label_visibility="collapsed", key="ion_dna_range")
             factor_ranges["Ion_DNA_Ratio"] = ion_dna_range
