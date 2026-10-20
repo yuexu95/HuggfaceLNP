@@ -94,7 +94,7 @@ st.markdown(
     
     ### 🎉 Enjoy the app!
     
-    *Version 2.0 | Last updated: January 2026*
+    *Version 2.0 | Last updated: October 2026*
     """
 )
 

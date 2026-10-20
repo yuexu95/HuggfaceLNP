@@ -652,6 +652,27 @@ def generate_mixture_design(ranges_dict, free_total, remainder_bounds, steps_dic
     return pd.DataFrame(design_points).drop_duplicates().reset_index(drop=True)
 
 
+def feasible_composition_polygon(ranges_dict, remainder, constraint_ranges, peg_pct):
+    """
+    Corners of the feasible Ionizable / Helper / Cholesterol region (PEG fixed), as dicts of the three
+    lipids in drawing order. None when fewer than two lipids are independent factors.
+    """
+    lipids = ["Ionizable_%", "Helper_%", "Cholesterol_%"]
+    independent = [c for c in lipids if c in ranges_dict and c != remainder]
+    if len(independent) != 2:
+        return None
+    free_total = 100.0 - peg_pct
+    rem_low, rem_high = constraint_ranges.get(remainder, (0.5, 100.0))
+    (x_lo, x_hi), (y_lo, y_hi) = ranges_dict[independent[0]], ranges_dict[independent[1]]
+    polygon = [(x_lo, y_lo), (x_hi, y_lo), (x_hi, y_hi), (x_lo, y_hi)]
+    polygon = _clip_polygon(polygon, 1, 1, free_total - rem_low)
+    polygon = _clip_polygon(polygon, -1, -1, -(free_total - rem_high))
+    return [
+        {independent[0]: x, independent[1]: y, remainder: free_total - x - y}
+        for x, y in polygon
+    ] or None
+
+
 def build_design(design_type, ranges_dict, baseline_pct, remainder, steps_dict, constraint_ranges):
     """
     Generates the design over the independent factors, fills lipids that are not studied with
@@ -939,6 +960,7 @@ if st.button("🚀 Generate DOE Design & Run Sheet", type="primary", use_contain
     with st.spinner("Generating DOE design..."):
         try:
             design_df = build_design(design_type, ranges, baseline_pct, remainder_component, factor_steps, constraint_ranges)
+            candidate_df = design_df.copy()
             
             # Filter invalid design points (where ratios sum > 100%)
             design_df = filter_valid_design_points(design_df, constraint_ranges)
@@ -982,6 +1004,16 @@ if st.button("🚀 Generate DOE Design & Run Sheet", type="primary", use_contain
                     st.session_state.num_replicates = num_replicates
                     st.session_state.num_blocks = num_blocks
                     st.session_state.pop("response_data", None)
+                    # Snapshot for the design-space plots (independent of later widget changes)
+                    st.session_state.viz_context = {
+                        "candidates": candidate_df,
+                        "factors": list(ranges),
+                        "ranges": dict(ranges),
+                        "remainder": remainder_component,
+                        "constraints": dict(constraint_ranges),
+                        "ratio_col": ION_RATIO_COL,
+                        "na": na,
+                    }
                     
                     st.success(f"""✅ **Design Generated Successfully!**
                     
@@ -1105,129 +1137,173 @@ if "run_sheet" in st.session_state:
     
     st.subheader("📊 Design Space Visualization")
     
-    # Get design points from design_display (which corresponds to valid design_df)
-    # This ensures 3D visualization matches the actual Design Matrix
-    design_for_viz = design_display.copy()
-    
-    # Create two columns for side-by-side display
-    col_3d, col_bubble = st.columns(2)
-    
-    with col_3d:
-        st.markdown("### 3D Molar Ratio Design Space")
+    viz = st.session_state.get("viz_context")
+    if viz is None:
+        st.info("Generate the design again to see the design-space plots.")
+    else:
+        lipids = ["Ionizable_%", "Helper_%", "Cholesterol_%"]
+        lipid_labels = {"Ionizable_%": "Ionizable", "Helper_%": "Helper", "Cholesterol_%": "Cholesterol"}
+        ratio_col = viz["ratio_col"]
+        factor_labels = {**{k: f"{v} %" for k, v in lipid_labels.items()}, ratio_col: f"Ion:{viz['na']} ratio"}
         
-        # Display number of visualization points
-        st.info(f"📍 **Visualizing {len(design_for_viz)} design points** (synchronized with Design Matrix)")
+        # Theme-specific steps (light / dark are each chosen, not flipped)
+        is_dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
+        c_point = "#3987e5" if is_dark else "#2a78d6"
+        c_excluded = "#8f8e88" if is_dark else "#8a8984"
+        c_surface = "#0e1117" if is_dark else "#ffffff"
+        c_region = "rgba(195,194,183,0.10)" if is_dark else "rgba(82,81,78,0.07)"
+        c_region_line = "rgba(195,194,183,0.45)" if is_dark else "rgba(82,81,78,0.35)"
         
-        # 3D Molar Ratio Space: Ionizable vs Cholesterol vs PEG
-        fig3d_molar = go.Figure(data=[go.Scatter3d(
-            x=design_for_viz["Ionizable_%"],
-            y=design_for_viz["Cholesterol_%"],
-            z=design_for_viz["PEG_%"],
-            mode='markers',
-            marker=dict(
-                size=8,
-                color=design_for_viz["Helper_%"],
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title="Helper %", x=1.1),
-                line=dict(width=1, color='white'),
-                opacity=0.9
-            ),
-            text=[f"Ion: {i:.1f}%<br>Chol: {c:.1f}%<br>PEG: {p:.1f}%<br>Helper: {h:.1f}%" 
-                  for i, c, p, h in zip(design_for_viz["Ionizable_%"], 
-                                       design_for_viz["Cholesterol_%"],
-                                       design_for_viz["PEG_%"],
-                                       design_for_viz["Helper_%"])],
-            hoverinfo='text',
-            name='Design Points'
-        )])
+        # Classify every candidate point: kept, outside the composition limits, or not pipettable
+        candidates = viz["candidates"].copy()
+        key_cols = [c for c in candidates.columns]
+        kept_keys = set(map(tuple, design_df[key_cols].round(4).values))
+        feasible_mask = valid_design_mask(candidates, viz["constraints"])
+        candidates["status"] = np.where(
+            [tuple(r) in kept_keys for r in candidates[key_cols].round(4).values], "kept",
+            np.where(feasible_mask, "volume", "outside")
+        )
+        n_kept = int((candidates["status"] == "kept").sum())
+        n_outside = int((candidates["status"] == "outside").sum())
+        n_volume = int((candidates["status"] == "volume").sum())
         
-        fig3d_molar.update_layout(
-            scene=dict(
-                xaxis_title="Ionizable Lipid (%)",
-                yaxis_title="Cholesterol (%)",
-                zaxis_title="PEG-Lipid (%)",
-                xaxis=dict(
-                    range=[design_display["Ionizable_%"].min() - 2, design_display["Ionizable_%"].max() + 2]
-                ),
-                yaxis=dict(
-                    range=[design_display["Cholesterol_%"].min() - 2, design_display["Cholesterol_%"].max() + 2]
-                ),
-                zaxis=dict(
-                    range=[design_display["PEG_%"].min() - 2, design_display["PEG_%"].max() + 2]
-                ),
-                camera=dict(
-                    eye=dict(x=1.5, y=1.5, z=1.3)
+        compositions = candidates.groupby(lipids, as_index=False).agg(
+            n_kept=("status", lambda s: int((s == "kept").sum())),
+            n_total=("status", "size"),
+            any_outside=("status", lambda s: bool((s == "outside").any())),
+        )
+        n_comp_kept = int((compositions["n_kept"] > 0).sum())
+        summary = f"**{n_kept}** design points · **{n_comp_kept}** lipid compositions"
+        if n_outside:
+            summary += f" · {n_outside} candidates outside the composition limits"
+        if n_volume:
+            summary += f" · {n_volume} removed for negative ethanol volume"
+        st.markdown(summary)
+        
+        col_ternary, col_pairs = st.columns(2)
+        
+        # ---------- Left: lipid composition on the mixture simplex ----------
+        with col_ternary:
+            st.markdown("##### Lipid composition (mol %)")
+            peg_values = candidates["PEG_%"].unique()
+            ternary_sum = 100.0 - float(peg_values[0])
+            
+            def ratio_levels(row, status):
+                match = candidates[(candidates[lipids] == row[lipids].values).all(axis=1) & (candidates["status"] == status)]
+                if ratio_col not in match.columns or match.empty:
+                    return ""
+                return ", ".join(f"{v:g}" for v in sorted(match[ratio_col].unique()))
+            
+            def hover(row):
+                text = (f"Ionizable {row['Ionizable_%']:.2f}% · Helper {row['Helper_%']:.2f}% · "
+                        f"Cholesterol {row['Cholesterol_%']:.2f}% · PEG {100 - ternary_sum:.2f}%")
+                if row["n_kept"]:
+                    text += f"<br>{row['n_kept']} design point(s)"
+                    levels = ratio_levels(row, "kept")
+                    if levels:
+                        text += f" · Ion:{viz['na']} {levels}"
+                dropped = ratio_levels(row, "volume")
+                if dropped:
+                    text += f"<br>Removed (negative ethanol) at Ion:{viz['na']} {dropped}"
+                if row["any_outside"]:
+                    text += "<br>Outside composition limits"
+                return text
+            
+            compositions["hover"] = compositions.apply(hover, axis=1)
+            fig_tern = go.Figure()
+            
+            region = feasible_composition_polygon(viz["ranges"], viz["remainder"], viz["constraints"], 100.0 - ternary_sum)
+            if region:
+                closed = region + region[:1]
+                fig_tern.add_trace(go.Scatterternary(
+                    a=[p["Ionizable_%"] for p in closed], b=[p["Helper_%"] for p in closed], c=[p["Cholesterol_%"] for p in closed],
+                    mode="lines", fill="toself", fillcolor=c_region, line=dict(color=c_region_line, width=1),
+                    name="Feasible region", hoverinfo="skip"
+                ))
+            
+            groups = [
+                ("Design point", compositions["n_kept"] > 0, dict(symbol="circle", size=12, color=c_point, line=dict(color=c_surface, width=2))),
+                ("Removed: negative ethanol", (compositions["n_kept"] == 0) & ~compositions["any_outside"], dict(symbol="x-thin", size=10, color=c_excluded, line=dict(color=c_excluded, width=2))),
+                ("Outside composition limits", (compositions["n_kept"] == 0) & compositions["any_outside"], dict(symbol="circle-open", size=9, color=c_excluded, line=dict(width=1.5))),
+            ]
+            for name, mask, marker in groups:
+                subset = compositions[mask]
+                if subset.empty:
+                    continue
+                fig_tern.add_trace(go.Scatterternary(
+                    a=subset["Ionizable_%"], b=subset["Helper_%"], c=subset["Cholesterol_%"],
+                    mode="markers", marker=marker, name=name,
+                    text=subset["hover"], hovertemplate="%{text}<extra></extra>"
+                ))
+            
+            # Zoom the triangle onto the explored region
+            mins = {c: max(0.0, np.floor((candidates[c].min() - 5) / 5) * 5) for c in lipids}
+            spare = ternary_sum - sum(mins.values())
+            if spare < 10:
+                mins = {c: 0.0 for c in lipids}
+            axis = lambda c: dict(title=dict(text=lipid_labels[c]), min=mins[c], ticksuffix="%", linewidth=1, gridcolor=c_region_line)
+            fig_tern.update_layout(
+                ternary=dict(sum=ternary_sum, aaxis=axis("Ionizable_%"), baxis=axis("Helper_%"), caxis=axis("Cholesterol_%")),
+                height=520,
+                margin=dict(l=50, r=50, t=30, b=40),
+                legend=dict(orientation="h", yanchor="top", y=-0.06, xanchor="center", x=0.5),
+            )
+            st.plotly_chart(fig_tern, use_container_width=True)
+            st.caption(f"Each corner direction is one lipid; PEG is fixed at {100 - ternary_sum:.1f}%, so the three shown lipids sum to "
+                       f"{ternary_sum:.1f}%. The shaded area is every composition allowed by the ranges.")
+        
+        # ---------- Right: pairwise projections of the independent factors ----------
+        with col_pairs:
+            st.markdown("##### Factor coverage")
+            factors = [f for f in viz["factors"] if f in candidates.columns][:4]
+            label = lambda f: factor_labels.get(f, f)
+            
+            if len(factors) < 2:
+                st.info("Pairwise coverage needs at least two independent factors.")
+            else:
+                k = len(factors)
+                fig_pairs = make_subplots(rows=k - 1, cols=k - 1, horizontal_spacing=0.08, vertical_spacing=0.08)
+                for i in range(1, k):
+                    for j in range(i):
+                        xf, yf = factors[j], factors[i]
+                        proj = candidates.groupby([xf, yf], as_index=False).agg(
+                            n_kept=("status", lambda s: int((s == "kept").sum())),
+                            n_total=("status", "size"),
+                        )
+                        kept = proj[proj["n_kept"] > 0]
+                        empty = proj[proj["n_kept"] == 0]
+                        fig_pairs.add_trace(go.Scatter(
+                            x=empty[xf], y=empty[yf], mode="markers",
+                            marker=dict(symbol="circle-open", size=9, color=c_excluded, line=dict(width=1.5)),
+                            name="No design point", legendgroup="empty", showlegend=(i == 1 and j == 0),
+                            hovertemplate=f"{label(xf)} %{{x:.4~g}}<br>{label(yf)} %{{y:.4~g}}<br>No design point<extra></extra>"
+                        ), row=i, col=j + 1)
+                        fig_pairs.add_trace(go.Scatter(
+                            x=kept[xf], y=kept[yf], mode="markers",
+                            marker=dict(size=8 + 3 * np.sqrt(kept["n_kept"]), color=c_point, line=dict(color=c_surface, width=2)),
+                            customdata=kept["n_kept"],
+                            name="Design points", legendgroup="kept", showlegend=(i == 1 and j == 0),
+                            hovertemplate=f"{label(xf)} %{{x:.4~g}}<br>{label(yf)} %{{y:.4~g}}<br>%{{customdata}} design point(s)<extra></extra>"
+                        ), row=i, col=j + 1)
+                        fig_pairs.update_xaxes(title_text=label(xf) if i == k - 1 else None, row=i, col=j + 1)
+                        fig_pairs.update_yaxes(title_text=label(yf) if j == 0 else None, row=i, col=j + 1)
+                # Hide the unused upper-triangle cells
+                for i in range(1, k):
+                    for j in range(i, k - 1):
+                        fig_pairs.update_xaxes(visible=False, row=i, col=j + 1)
+                        fig_pairs.update_yaxes(visible=False, row=i, col=j + 1)
+                fig_pairs.update_xaxes(showgrid=True, gridwidth=1, zeroline=False)
+                fig_pairs.update_yaxes(showgrid=True, gridwidth=1, zeroline=False)
+                fig_pairs.update_layout(
+                    height=520,
+                    margin=dict(l=50, r=20, t=30, b=40),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                 )
-            ),
-            height=600,
-            hovermode='closest',
-            showlegend=False,
-            margin=dict(l=0, r=0, t=20, b=0)
-        )
-        
-        st.plotly_chart(fig3d_molar, use_container_width=True)
-    
-    with col_bubble:
-        st.markdown("### Response Surface Heatmap")
-        
-        # Bubble Chart: Helper Percentage vs Ionizable% and Cholesterol%
-        # Bubble size represents the Helper% value
-        
-        # Create bubble chart data - each row becomes one bubble
-        bubble_data = []
-        for _, row in design_display.iterrows():
-            bubble_data.append({
-                'Ionizable_%': row['Ionizable_%'],
-                'Cholesterol_%': row['Cholesterol_%'],
-                'Helper_%': row['Helper_%']
-            })
-        bubble_df = pd.DataFrame(bubble_data)
-        num_bubbles = len(bubble_df)
-        
-        # Normalize bubble sizes (scale Helper% to reasonable marker sizes)
-        min_helper = bubble_df['Helper_%'].min()
-        max_helper = bubble_df['Helper_%'].max()
-        helper_range = max_helper - min_helper if max_helper > min_helper else 1
-        bubble_sizes = 10 + (bubble_df['Helper_%'] - min_helper) / helper_range * 50  # Size range: 10-60
-        
-        st.info(f"🔵 **Bubbles: {num_bubbles}** (each bubble = 1 design point, size ∝ Helper %)")
-        
-        fig_hm = go.Figure(data=go.Scatter(
-            x=bubble_df['Ionizable_%'],
-            y=bubble_df['Cholesterol_%'],
-            mode='markers',
-            marker=dict(
-                size=bubble_sizes,
-                color=bubble_df['Helper_%'],
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title="Helper (%)"),
-                line=dict(width=1, color='white'),
-                opacity=0.7
-            ),
-            text=[f"Ionizable: {i:.1f}%<br>Cholesterol: {c:.1f}%<br>Helper: {h:.1f}%" 
-                  for i, c, h in zip(bubble_df['Ionizable_%'], bubble_df['Cholesterol_%'], bubble_df['Helper_%'])],
-            hoverinfo='text',
-            name='Design Points'
-        ))
-        
-        # Set axis ranges based on Design Matrix data
-        fig_hm.update_layout(
-            xaxis_title="Ionizable Lipid (%)",
-            yaxis_title="Cholesterol (%)",
-            xaxis=dict(
-                range=[design_display["Ionizable_%"].min() - 2, design_display["Ionizable_%"].max() + 2]
-            ),
-            yaxis=dict(
-                range=[design_display["Cholesterol_%"].min() - 2, design_display["Cholesterol_%"].max() + 2]
-            ),
-            height=600,
-            hovermode='closest',
-            margin=dict(l=50, r=50, t=20, b=50)
-        )
-        
-        st.plotly_chart(fig_hm, use_container_width=True)
+                st.plotly_chart(fig_pairs, use_container_width=True)
+                note = "Each panel projects the design onto two factors; larger dots = more design points at that spot."
+                if len(viz["factors"]) > 4:
+                    note += " Showing the first 4 factors."
+                st.caption(note)
     
     st.markdown("---")
     
@@ -2015,51 +2091,6 @@ if "run_sheet" in st.session_state:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
-    
-    st.markdown("---")
-    
-    st.subheader("📈 Experimental Design Statistics")
-    
-    stat_col1, stat_col2 = st.columns(2)
-    
-    with stat_col1:
-        st.markdown("**Design Space Coverage**")
-        coverage_text = "**Factor Ranges Explored:**\n\n"
-        for column, label in [("Ionizable_%", "Ionizable"), ("Helper_%", "Helper"), ("Cholesterol_%", "Cholesterol")]:
-            if column in factor_ranges:
-                low, high = factor_ranges[column]
-                coverage_text += f"• {label}: {low:.1f} → {high:.1f}% (step {factor_steps[column]:g})\n"
-            elif column == remainder_component:
-                coverage_text += f"• {label}: remainder ({design_display[column].min():.1f} → {design_display[column].max():.1f}%)\n"
-        coverage_text += f"• PEG: {pegdmg2000_ratio:.1f}% (fixed)\n"
-        if ION_RATIO_COL in factor_ranges:
-            low, high = factor_ranges[ION_RATIO_COL]
-            coverage_text += f"• Ion:{na}: {low:.1f} → {high:.1f} μg/μg (step {factor_steps[ION_RATIO_COL]:g})"
-        
-        st.text(coverage_text)
-    
-    with stat_col2:
-        st.markdown("**Actual Design Point Statistics**")
-        stats_text = f"""Design Points Generated: {len(design_df)}
-Total Experimental Runs: {len(run_sheet)}
-
-Ionizable Lipid:
-  Range: {design_display['Ionizable_%'].min():.1f}% - {design_display['Ionizable_%'].max():.1f}%
-  
-Cholesterol:
-  Range: {design_display['Cholesterol_%'].min():.1f}% - {design_display['Cholesterol_%'].max():.1f}%
-  
-Helper Lipid (Calculated):
-  Range: {design_display['Helper_%'].min():.1f}% - {design_display['Helper_%'].max():.1f}%
-"""
-        st.text(stats_text)
-    
-    with stat_col2:
-        st.markdown("**Volume Range (µL)**")
-        st.text(f"""Ion:    {run_sheet['Ionizable_Vol_uL'].min():.1f} → {run_sheet['Ionizable_Vol_uL'].max():.1f}
-Helper: {run_sheet['Helper_Vol_uL'].min():.1f} → {run_sheet['Helper_Vol_uL'].max():.1f}
-Chol:   {run_sheet['Chol_Vol_uL'].min():.1f} → {run_sheet['Chol_Vol_uL'].max():.1f}
-PEG:    {run_sheet['PEG_Vol_uL'].min():.1f} → {run_sheet['PEG_Vol_uL'].max():.1f}""")
 
 else:
     st.info("👈 **Start with STAGE 1: PLANNING** - Define your DOE objective, response variable, and components to begin the DOE workflow.")
