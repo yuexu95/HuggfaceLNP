@@ -3,21 +3,33 @@ name: Sync to Hugging Face hub
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          lfs: true
 
-      - name: Push to hub
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Upload to Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USERNAME: ${{ secrets.HF_USERNAME }}
         run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git push --force https://$HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/YUEXU95/formulation main
+          pip install -U huggingface_hub
+          python - <<'EOF'
+          import os
+          from huggingface_hub import upload_folder
+          upload_folder(
+              repo_id="YUEXU95/formulation",
+              repo_type="space",
+              folder_path=".",
+              ignore_patterns=[".git/*", ".github/*", "**/__pycache__/**", "*.pyc", "venv/*"],
+              delete_patterns=["*"],
+              commit_message=f"Sync from GitHub {os.environ['GITHUB_SHA'][:7]}",
+              token=os.environ["HF_TOKEN"],
+          )
+          EOF
