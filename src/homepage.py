@@ -1,7 +1,7 @@
 """
 
-This is the main page, that you have to run with "streamlit run" to launch the app locally.
-Streamlit automatically create the tabs in the left sidebar from the .py files located in /pages
+This is the main page that you have to run with "streamlit run" to launch the app locally.
+Streamlit automatically creates the tabs in the left sidebar from the .py files located in /pages
 Here we just have the home page, with a short description of the tabs, and some images
 
 """
@@ -22,8 +22,8 @@ st.set_page_config(
 st.title("👋 LNP Formulation Calculator")
 st.markdown("**Comprehensive toolkit for lipid nanoparticle (LNP) formulation design, calculation, and optimization.**")
 st.markdown("From basic calculations to high-throughput DOE screening — streamline your LNP workflows for pDNA, mRNA, and complex multi-component systems.")
-st.markdown("Developed by **Yue Xu**, YongLi Lab @ BCM — more at https://yuexu95.github.io/")
-st.markdown("Have feedback or feature requests? Email: **yue.xu@bcm.edu**.")
+st.markdown("Developed by **Yue Xu**, more at https://yuexu95.github.io/")
+st.markdown("Have feedback or feature requests? Email: **yxu@cmh.edu**.")
 st.markdown("---")
 
 # Description of the features. 
