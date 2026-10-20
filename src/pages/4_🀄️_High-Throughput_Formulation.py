@@ -6,9 +6,6 @@ from plotly.subplots import make_subplots
 import itertools
 from datetime import datetime
 from io import BytesIO
-import ternary
-import matplotlib.pyplot as plt
-from matplotlib import cm
 
 st.set_page_config(page_title="LNP-Flow: Professional DOE Designer", page_icon="🀄", layout="wide")
 
@@ -133,7 +130,7 @@ with st.expander("📦 Lipid Components Configuration", expanded=False):
     with col_conc2:
         conc_helper = st.number_input(
             "Helper Lipid (μg/μL)",
-            value=10.0,
+            value=4.0,
             step=0.1,
             key="conc_helper"
         )
@@ -147,7 +144,7 @@ with st.expander("📦 Lipid Components Configuration", expanded=False):
     with col_conc4:
         conc_peg = st.number_input(
             "PEG-DMG2000 (μg/μL)",
-            value=10.0,
+            value=4.0,
             step=0.1,
             key="conc_peg"
         )
@@ -158,7 +155,7 @@ with st.expander("📦 Lipid Components Configuration", expanded=False):
     with dna_col1:
         dna_mass_ug = st.number_input(
             f"{na} Scale (μg)",
-            value=3.0,
+            value=5.0,
             step=0.1,
             key="dna_mass_ug"
         )
@@ -213,7 +210,7 @@ if abs(baseline_total - 100.0) > 0.01:
 st.markdown("---")
 
 st.subheader("Additional Parameters")
-col_add1, col_add2, col_add3 = st.columns(3)
+col_add1, col_add2, col_add3, col_add4 = st.columns(4)
 with col_add1:
     ionizable_lipid_to_dna_ratio = st.number_input(
         f"Ion:{na} Mass Ratio",
@@ -234,6 +231,15 @@ with col_add3:
         value=1.0,
         step=0.1,
         key="amines_per_molecule"
+    )
+with col_add4:
+    min_pipette_volume = st.number_input(
+        "Min Pipettable Volume (μL)",
+        value=0.5,
+        min_value=0.0,
+        step=0.1,
+        key="min_pipette_volume",
+        help="Runs needing a smaller volume of any component are flagged (most P2/P10 pipettes are inaccurate below ~0.5 μL)"
     )
 
 
@@ -325,10 +331,11 @@ with st.expander("📏 Define Factor Ranges", expanded=True):
     constraint_ranges = {}
     
     # (label, slider bounds, default range, recommended step, why)
+    # Default ranges are centred on SM-102 (50 / 10 / 38.5 / 1.5 mol%) and extended equally on both sides
     range_specs = {
-        "Ionizable_%": ("Ionizable Lipid %", (20.0, 70.0), (30.0, 50.0), 5.0, "Primary driver: 5% steps give 5 levels across 30-50%"),
-        "Helper_%": ("Helper Lipid %", (0.0, 40.0), (10.0, 20.0), 5.0, "Narrow range: 5% steps give 3 levels (10/15/20%)"),
-        "Cholesterol_%": ("Cholesterol %", (20.0, 60.0), (35.0, 50.0), 5.0, "5% steps give 4 levels across 35-50%"),
+        "Ionizable_%": ("Ionizable Lipid %", (20.0, 70.0), (40.0, 60.0), 5.0, "Primary driver: 5% steps give 5 levels centred on SM-102's 50%"),
+        "Helper_%": ("Helper Lipid %", (0.0, 40.0), (5.0, 15.0), 5.0, "5% steps give 3 levels (5/10/15%) centred on SM-102's 10%"),
+        "Cholesterol_%": ("Cholesterol %", (20.0, 60.0), (28.5, 48.5), 5.0, "5% steps give 5 levels centred on SM-102's 38.5%"),
         ION_RATIO_COL: (f"Ion:{na} Ratio", (1.0, 30.0), (5.0, 15.0), 5.0, "Steps of 5 give 3 levels for screening; refine with 2.5 later"),
     }
     studied = {
@@ -368,7 +375,8 @@ with st.expander("📏 Define Factor Ranges", expanded=True):
             factor_ranges[factor_name] = (float(cmin), float(cmax))
             factor_steps[factor_name] = st.number_input(f"{factor_name} - Step", min_value=0.001, value=max((cmax - cmin) / 2, 0.001), key=f"{factor_name}_step")
     
-    st.markdown("**📌 Recommended Ranges**: Ionizable 30-50% | Helper 10-20% | Cholesterol 35-50% | **PEG 1% optimal**")
+    st.markdown("**📌 Default ranges are centred on SM-102** (Ionizable 50 / Helper 10 / Cholesterol 38.5 / PEG 1.5 mol%): "
+                "Ionizable 40–60% | Helper 5–15% | Cholesterol 28.5–48.5%")
 st.markdown("---")
 
 st.subheader("🎯 DOE Design Selection")
@@ -703,6 +711,54 @@ def build_design(design_type, ranges_dict, baseline_pct, remainder, steps_dict, 
     return design_df[COMPOSITION_COLUMNS + [c for c in design_df.columns if c not in COMPOSITION_COLUMNS]]
 
 
+def fit_response_surface(data, factors, ranges_dict, response="Response"):
+    """
+    Least-squares quadratic response-surface model on coded factors (-1..1):
+    intercept + main effects + two-factor interactions + squared terms.
+    Terms the data cannot support are dropped (squares need 3+ levels; fewer runs -> simpler model).
+    Returns None when there are not enough runs for even a main-effects model.
+    """
+    data = data.dropna(subset=[response] + factors)
+    usable = [f for f in factors if data[f].nunique() >= 2]
+    if not usable:
+        return None
+    
+    def code(f, values):
+        low, high = ranges_dict[f]
+        return (np.asarray(values, dtype=float) - (low + high) / 2) / ((high - low) / 2)
+    
+    main = [((f,), f) for f in usable]
+    inter = [((a, b), f"{a} × {b}") for a, b in itertools.combinations(usable, 2)]
+    square = [((f, f), f"{f}²") for f in usable if data[f].nunique() >= 3]
+    candidates = [main + inter + square, main + inter, main]
+    terms = next((t for t in candidates if len(data) >= len(t) + 2), None)
+    if terms is None:
+        return None
+    
+    def design_matrix(values):
+        coded = {f: code(f, values[f]) for f in usable}
+        n = len(next(iter(coded.values())))
+        columns = [np.ones(n)] + [np.prod([coded[f] for f in combo], axis=0) for combo, _ in terms]
+        return np.column_stack(columns)
+    
+    X = design_matrix({f: data[f].values for f in usable})
+    y = data[response].astype(float).values
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    residual = y - X @ beta
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = 1 - float((residual ** 2).sum()) / ss_tot if ss_tot > 0 else float("nan")
+    model_name = {len(main + inter + square): "Quadratic", len(main + inter): "Linear + interactions", len(main): "Linear"}[len(terms)]
+    return {
+        "factors": usable,
+        "terms": ["Intercept"] + [name for _, name in terms],
+        "coefficients": beta,
+        "r2": r2,
+        "n": len(y),
+        "model": model_name,
+        "predict": lambda values: design_matrix(values) @ beta,
+    }
+
+
 def calculate_np_ratio(dna_mass_ug, ionizable_lipid_moles, amines_per_molecule=1.0):
     """Calculate N/P ratio using pDNA formulation methodology."""
     phosphate_moles_mol = dna_mass_ug * 1e-6 / 330.0
@@ -772,12 +828,33 @@ def calculate_volumes(
     }
 
 
+# FDA-approved LNP compositions (mol %), as on the FDA Approved Formulations page
+LNP_REFERENCE_FORMULATIONS = {
+    "SM-102": {"ion": 50.0, "helper": 10.0, "chol": 38.5, "peg": 1.5},
+    "MC3": {"ion": 50.0, "helper": 10.0, "chol": 38.5, "peg": 1.5},
+    "ALC-0315": {"ion": 46.3, "helper": 9.4, "chol": 42.7, "peg": 1.6},
+}
+
+
+# Volumes checked against the pipetting threshold. Ethanol and water are diluents: a small error
+# there barely changes the composition, so they are not flagged.
+PIPETTED_COMPONENTS = {
+    "Ionizable": "Ionizable_Vol_uL",
+    "Helper": "Helper_Vol_uL",
+    "Cholesterol": "Chol_Vol_uL",
+    "PEG": "PEG_Vol_uL",
+    "Nucleic acid": "DNA_Vol_uL",
+    "Citrate": "Citrate_Vol_uL",
+}
+
+
 def generate_run_sheet(design_df, num_replicates, num_blocks, mw_ion, mw_helper, mw_chol, mw_peg,
                        conc_ion, conc_helper, conc_chol, conc_peg,
                        dna_mass_ug=None, dna_concentration=None,
                        ionizable_lipid_to_dna_ratio=10.0,
                        aqueous_to_ethanol_ratio=3.0,
-                       amines_per_molecule=1.0):
+                       amines_per_molecule=1.0,
+                       min_volume=0.0):
     """
     Generate a complete run sheet with pipetting volumes and N/P ratios.
     Same volume logic as the formulation calculator. Run order is randomized within each block.
@@ -808,6 +885,11 @@ def generate_run_sheet(design_df, num_replicates, num_blocks, mw_ion, mw_helper,
             amine_moles = vol_dict["Ionizable_Moles"] * amines_per_molecule
             phosphate_moles = vol_dict["Phosphate_Moles"]
             np_ratio = amine_moles / phosphate_moles if phosphate_moles > 0 else 0
+            low_volumes = [
+                f"{name} {vol_dict[key]:g}"
+                for name, key in PIPETTED_COMPONENTS.items()
+                if 0 < vol_dict[key] < min_volume
+            ]
             
             for rep in range(num_replicates):
                 block_runs.append({
@@ -830,6 +912,7 @@ def generate_run_sheet(design_df, num_replicates, num_blocks, mw_ion, mw_helper,
                     f"Citrate_{citrate_stock_mM}mM_Vol_uL": vol_dict["Citrate_Vol_uL"],
                     "Water_Vol_uL": vol_dict["Water_Vol_uL"],
                     "Total_Vol_uL": vol_dict["Total_Vol_uL"],
+                    "Volume_Check": ("⚠ < " + f"{min_volume:g} μL: " + ", ".join(low_volumes)) if low_volumes else "OK",
                     "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "Notes": ""
                 })
@@ -840,79 +923,6 @@ def generate_run_sheet(design_df, num_replicates, num_blocks, mw_ion, mw_helper,
             run_number += 1
     
     return pd.DataFrame(run_data)
-
-
-# ============================================================================
-# TERNARY PLOT VISUALIZATION FOR MIXTURE DESIGN
-# ============================================================================
-
-def create_ternary_plot(analysis_data, response_variable, component1='Ionizable_%', 
-                       component2='Cholesterol_%', component3='PEG_%',
-                       label1='Ionizable Lipid %', label2='Cholesterol %', label3='PEG-Lipid %'):
-    """Create ternary plot for mixture design response visualization."""
-    
-    # Prepare data - convert to numeric and filter valid data
-    data_clean = analysis_data.copy()
-    data_clean[component1] = pd.to_numeric(data_clean[component1], errors='coerce')
-    data_clean[component2] = pd.to_numeric(data_clean[component2], errors='coerce')
-    data_clean[component3] = pd.to_numeric(data_clean[component3], errors='coerce')
-    data_clean['Response'] = pd.to_numeric(data_clean['Response'], errors='coerce')
-    
-    # Remove rows with any NaN values
-    data_clean = data_clean[[component1, component2, component3, 'Response']].dropna()
-    
-    if len(data_clean) == 0:
-        return None
-    
-    # Create figure and ternary axis
-    scale = 100
-    figure, tax = ternary.figure(scale=scale)
-    
-    # Draw boundary and gridlines
-    tax.boundary(linewidth=2.0)
-    tax.gridlines(color='gray', multiple=10, linewidth=0.5, alpha=0.3)
-    
-    # Set axis labels
-    tax.left_axis_label(label1, offset=0.14, fontsize=10, fontweight='bold')
-    tax.right_axis_label(label2, offset=0.14, fontsize=10, fontweight='bold')
-    tax.bottom_axis_label(label3, offset=0.14, fontsize=10, fontweight='bold')
-    
-    # Draw ticks
-    tax.ticks(axis='lbr', linewidth=1, multiple=10, offset=0.02, fontsize=8)
-    
-    # Prepare points and values
-    points = [(row[component1], row[component2], row[component3]) 
-              for _, row in data_clean.iterrows()]
-    values = data_clean['Response'].values
-    
-    # Normalize values for color mapping (0-1 range)
-    if len(values) > 0 and (values.max() - values.min()) > 0:
-        values_normalized = (values - values.min()) / (values.max() - values.min())
-    else:
-        values_normalized = np.ones_like(values) * 0.5
-    
-    # Get colormap
-    cmap = cm.get_cmap('RdYlGn')
-    colors = [cmap(v) for v in values_normalized]
-    
-    # Plot scatter points with colors
-    for point, value, color, orig_value in zip(points, values_normalized, colors, values):
-        tax.scatter([point], c=[color], s=150, edgecolors='black', linewidth=1.5, zorder=3)
-        
-        # Add value annotations
-        tax.annotate(f'{orig_value:.1f}', position=point, ha='center', va='center',
-                    color='white', fontweight='bold', fontsize=7, zorder=4)
-    
-    # Clear matplotlib ticks and hide axes
-    tax.clear_matplotlib_ticks()
-    
-    # Add colorbar manually
-    sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=values.min(), vmax=values.max()))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=tax.get_axes(), orientation='right', pad=0.1, fraction=0.046)
-    cbar.set_label(response_variable, fontsize=10, fontweight='bold')
-    
-    return figure
 
 
 # ============================================================================
@@ -977,12 +987,16 @@ if st.button("🚀 Generate DOE Design & Run Sheet", type="primary", use_contain
                     dna_concentration=dna_concentration,
                     ionizable_lipid_to_dna_ratio=ionizable_lipid_to_dna_ratio,
                     aqueous_to_ethanol_ratio=aqueous_to_ethanol_ratio,
-                    amines_per_molecule=amines_per_molecule
+                    amines_per_molecule=amines_per_molecule,
+                    min_volume=min_pipette_volume
                 )
                 
                 # Check for negative Ethanol volumes
                 invalid_runs = run_sheet[run_sheet['Ethanol_Vol_uL'] < 0]
                 valid_run_sheet = run_sheet[run_sheet['Ethanol_Vol_uL'] >= 0].copy()
+                # Renumber so the lab sequence has no gaps where runs were dropped
+                valid_run_sheet["Run_ID"] = [f"R{i:03d}" for i in range(1, len(valid_run_sheet) + 1)]
+                valid_run_sheet = valid_run_sheet.reset_index(drop=True)
                 
                 if len(invalid_runs) > 0:
                     st.warning(f"⚠️ **WARNING: {len(invalid_runs)} experimental runs have NEGATIVE Ethanol volume!**\n\nThese runs are INVALID and will be ignored:\n")
@@ -1003,7 +1017,8 @@ if st.button("🚀 Generate DOE Design & Run Sheet", type="primary", use_contain
                     st.session_state.doe_objective = objective
                     st.session_state.num_replicates = num_replicates
                     st.session_state.num_blocks = num_blocks
-                    st.session_state.pop("response_data", None)
+                    st.session_state.responses = {}
+                    st.session_state.design_version = st.session_state.get("design_version", 0) + 1
                     # Snapshot for the design-space plots (independent of later widget changes)
                     st.session_state.viz_context = {
                         "candidates": candidate_df,
@@ -1013,6 +1028,9 @@ if st.button("🚀 Generate DOE Design & Run Sheet", type="primary", use_contain
                         "constraints": dict(constraint_ranges),
                         "ratio_col": ION_RATIO_COL,
                         "na": na,
+                        "min_volume": min_pipette_volume,
+                        "stocks": {"Ionizable": conc_ionizable, "Helper": conc_helper, "Cholesterol": conc_chol, "PEG": conc_peg},
+                        "scale_ug": dna_mass_ug,
                     }
                     
                     st.success(f"""✅ **Design Generated Successfully!**
@@ -1081,95 +1099,146 @@ if "run_sheet" in st.session_state:
     
     st.markdown("---")
     
-    st.subheader("🔍 Design Matrix")
-
+    st.subheader("🧪 Design Matrix & Lab Run Sheet")
     
+    # Design points on their own are still exported as a separate Excel sheet
     design_display = design_df.copy()
     design_display["Helper_%"] = 100.0 - design_display["Ionizable_%"] - design_display["Cholesterol_%"] - design_display["PEG_%"]
     
-    # Display number of design points
-    num_design_points = len(design_display)
-    st.info(f"📍 **Total Design Points: {num_design_points}**")
-    
-    st.dataframe(
-        design_display.round(2),
-        use_container_width=True,
-        height=300
+    st.caption(
+        f"**{len(design_df)}** design points × **{num_replicates}** replicate(s) × **{num_blocks}** block(s) "
+        f"= **{len(run_sheet)}** runs. Each row is one run; **Design point** is the formulation it belongs to."
     )
     
-    st.markdown("---")
+    id_cols = ["Run_ID", "Block", "Experiment", "Replicate"]
+    volume_cols = [c for c in run_sheet.columns if c.endswith("_Vol_uL")]
+    check_cols = [c for c in ["Volume_Check", "Notes"] if c in run_sheet.columns]
+    factor_cols = [c for c in run_sheet.columns if c not in id_cols + volume_cols + check_cols + ["Timestamp"]]
+    column_groups = {
+        "Composition & factors": factor_cols,
+        "Pipetting volumes (μL)": volume_cols,
+        "Checks & notes": check_cols,
+    }
     
-    st.subheader("🧪 Lab Run Sheet")
+    ctrl_order, ctrl_cols = st.columns([1, 1.4])
+    with ctrl_order:
+        row_order = st.segmented_control(
+            "Order rows by", ["Run order", "Design point"], default="Run order", key="sheet_order",
+            help="Run order is the randomized sequence to follow in the lab; Design point groups replicates and blocks of the same formulation."
+        ) or "Run order"
+    with ctrl_cols:
+        shown_groups = st.segmented_control(
+            "Columns", list(column_groups), selection_mode="multi", default=list(column_groups), key="sheet_columns"
+        ) or []
     
-    if len(run_sheet) > 20:
-        show_rows = st.slider("Show first N rows", min_value=5, max_value=len(run_sheet), value=10)
-    else:
-        show_rows = len(run_sheet)
+    # Measured results live in session state keyed by Run_ID, so sorting or hiding columns never mixes them up
+    responses = st.session_state.setdefault("responses", {})
+    response_name = response_variable or "Response"
     
-    # Display run sheet with N/P ratio information highlighted
-    run_sheet_display = run_sheet.head(show_rows).copy()
+    with st.expander("📤 Upload results CSV instead of typing", expanded=False):
+        st.caption("Columns: `Run_ID` and `Response` (or just `Response`, in run order R001, R002, …).")
+        uploaded_file = st.file_uploader("Results CSV", type=["csv"], key="result_upload", label_visibility="collapsed")
+        if uploaded_file is not None and st.session_state.get("loaded_upload_id") != uploaded_file.file_id:
+            try:
+                uploaded_df = pd.read_csv(uploaded_file)
+                if "Response" not in uploaded_df.columns:
+                    st.error("The CSV needs a 'Response' column.")
+                else:
+                    values = pd.to_numeric(uploaded_df["Response"], errors="coerce")
+                    run_ids = uploaded_df["Run_ID"].astype(str) if "Run_ID" in uploaded_df.columns else run_sheet["Run_ID"].iloc[:len(values)]
+                    responses.clear()
+                    responses.update({rid: float(v) for rid, v in zip(run_ids, values) if pd.notna(v) and rid in set(run_sheet["Run_ID"])})
+                    st.session_state.loaded_upload_id = uploaded_file.file_id
+                    st.session_state.design_version = st.session_state.get("design_version", 0) + 1  # refresh the table
+                    st.success(f"✅ Loaded {len(responses)} results from {uploaded_file.name}")
+            except Exception as e:
+                st.error(f"Error loading file: {e}")
     
-    # Highlight columns with N/P information if available
-    st.dataframe(
-        run_sheet_display,
+    sheet = run_sheet if row_order == "Run order" else run_sheet.sort_values(["Experiment", "Block", "Replicate"])
+    shown_cols = id_cols + [c for group in column_groups if group in shown_groups for c in column_groups[group]]
+    table = sheet[shown_cols].copy()
+    table["Response"] = sheet["Run_ID"].map(responses).astype(float)
+    edited = st.data_editor(
+        table,
         use_container_width=True,
-        height=400
+        hide_index=True,
+        height=min(38 + 35 * len(sheet), 560),
+        disabled=shown_cols,
+        key=f"run_sheet_editor_{st.session_state.get('design_version', 0)}_{row_order}_{'-'.join(shown_groups)}",
+        column_config={
+            "Run_ID": st.column_config.TextColumn("Run", pinned=True),
+            "Experiment": st.column_config.NumberColumn("Design point", help="Design point (formulation) this run belongs to"),
+            "NP_Ratio": st.column_config.NumberColumn("N/P", format="%.2f"),
+            **{c: st.column_config.NumberColumn(c.replace("_Vol_uL", " (μL)"), format="%.2f") for c in volume_cols},
+            "Volume_Check": st.column_config.TextColumn("Volume check", width="medium"),
+            "Response": st.column_config.NumberColumn(f"✏️ {response_name}", help="Type the measured result for each run", pinned=True),
+        },
     )
+    for run_id, value in zip(edited["Run_ID"], edited["Response"]):
+        if pd.notna(value):
+            responses[run_id] = float(value)
+        else:
+            responses.pop(run_id, None)
+    st.caption(f"✏️ **{len(responses)} / {len(run_sheet)}** runs have a measured {response_name}. "
+               "Type results in the last column — the response surface below updates as you go.")
     
-    if len(run_sheet) > show_rows:
-        st.info(f"📌 Showing first {show_rows} of {len(run_sheet)} runs. Download full sheet below.")
-    
-    # Show N/P Ratio summary if calculated
-    if "NP_Ratio" in run_sheet.columns and run_sheet["NP_Ratio"].dtype != 'object':
-        np_values = pd.to_numeric(run_sheet["NP_Ratio"], errors='coerce')
-        np_values = np_values.dropna()
-        if len(np_values) > 0:
-            st.markdown("---")
-            col_np1, col_np2, col_np3 = st.columns(3)
-            with col_np1:
-                st.metric("N/P Min", f"{np_values.min():.2f}")
-            with col_np2:
-                st.metric("N/P Avg", f"{np_values.mean():.2f}")
-            with col_np3:
-                st.metric("N/P Max", f"{np_values.max():.2f}")
+    # N/P range across all runs
+    np_values = pd.to_numeric(run_sheet.get("NP_Ratio"), errors="coerce").dropna() if "NP_Ratio" in run_sheet.columns else pd.Series(dtype=float)
+    if len(np_values) > 0:
+        col_np1, col_np2, col_np3 = st.columns(3)
+        with col_np1:
+            st.metric("N/P Min", f"{np_values.min():.2f}")
+        with col_np2:
+            st.metric("N/P Avg", f"{np_values.mean():.2f}")
+        with col_np3:
+            st.metric("N/P Max", f"{np_values.max():.2f}")
     
     st.markdown("---")
     
     st.subheader("📊 Design Space Visualization")
     
     viz = st.session_state.get("viz_context")
-    if viz is None:
+    if viz is None or "min_volume" not in viz:
         st.info("Generate the design again to see the design-space plots.")
     else:
         lipids = ["Ionizable_%", "Helper_%", "Cholesterol_%"]
         lipid_labels = {"Ionizable_%": "Ionizable", "Helper_%": "Helper", "Cholesterol_%": "Cholesterol"}
         ratio_col = viz["ratio_col"]
         factor_labels = {**{k: f"{v} %" for k, v in lipid_labels.items()}, ratio_col: f"Ion:{viz['na']} ratio"}
+        min_vol = viz["min_volume"]
         
         # Theme-specific steps (light / dark are each chosen, not flipped)
         is_dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
         c_point = "#3987e5" if is_dark else "#2a78d6"
+        c_warning = "#fab219"
+        c_ink = "#f0efec" if is_dark else "#0b0b0b"
         c_excluded = "#8f8e88" if is_dark else "#8a8984"
         c_surface = "#0e1117" if is_dark else "#ffffff"
         c_region = "rgba(195,194,183,0.10)" if is_dark else "rgba(82,81,78,0.07)"
         c_region_line = "rgba(195,194,183,0.45)" if is_dark else "rgba(82,81,78,0.35)"
         
-        # Classify every candidate point: kept, outside the composition limits, or not pipettable
+        # Design points whose runs need a volume below the pipetting threshold
+        low_experiments = set(run_sheet.loc[run_sheet["Volume_Check"] != "OK", "Experiment"])
         candidates = viz["candidates"].copy()
-        key_cols = [c for c in candidates.columns]
-        kept_keys = set(map(tuple, design_df[key_cols].round(4).values))
+        key_cols = list(candidates.columns)
+        kept_status = {
+            tuple(row): ("low" if idx + 1 in low_experiments else "kept")
+            for idx, row in zip(design_df.index, design_df[key_cols].round(4).values)
+        }
         feasible_mask = valid_design_mask(candidates, viz["constraints"])
-        candidates["status"] = np.where(
-            [tuple(r) in kept_keys for r in candidates[key_cols].round(4).values], "kept",
-            np.where(feasible_mask, "volume", "outside")
-        )
-        n_kept = int((candidates["status"] == "kept").sum())
+        candidates["status"] = [
+            kept_status.get(tuple(row), "volume" if feasible else "outside")
+            for row, feasible in zip(candidates[key_cols].round(4).values, feasible_mask)
+        ]
+        is_kept = lambda s: s.isin(["kept", "low"])
+        n_kept = int(is_kept(candidates["status"]).sum())
+        n_low_runs = int((run_sheet["Volume_Check"] != "OK").sum())
         n_outside = int((candidates["status"] == "outside").sum())
         n_volume = int((candidates["status"] == "volume").sum())
         
         compositions = candidates.groupby(lipids, as_index=False).agg(
-            n_kept=("status", lambda s: int((s == "kept").sum())),
-            n_total=("status", "size"),
+            n_kept=("status", lambda s: int(is_kept(s).sum())),
+            n_low=("status", lambda s: int((s == "low").sum())),
             any_outside=("status", lambda s: bool((s == "outside").any())),
         )
         n_comp_kept = int((compositions["n_kept"] > 0).sum())
@@ -1180,29 +1249,74 @@ if "run_sheet" in st.session_state:
             summary += f" · {n_volume} removed for negative ethanol volume"
         st.markdown(summary)
         
+        # ---------- Pipetting check: what to change so every volume is ≥ the threshold ----------
+        if n_low_runs:
+            volume_cols = {name: col for name, col in [
+                ("Ionizable", "Ionizable_Vol_uL"), ("Helper", "Helper_Vol_uL"), ("Cholesterol", "Chol_Vol_uL"),
+                ("PEG", "PEG_Vol_uL"), (f"{viz['na']} stock", f"{viz['na']}_Vol_uL"),
+                ("Citrate", next((c for c in run_sheet.columns if c.startswith("Citrate_")), None)),
+            ] if col in run_sheet.columns}
+            smallest = {name: run_sheet.loc[run_sheet[col] > 0, col].min() for name, col in volume_cols.items()}
+            too_small = {name: v for name, v in smallest.items() if v < min_vol}
+            
+            fixes = []
+            # Option 1: dilute lipid stocks (lipid volume grows, taken out of the added ethanol)
+            dilutions = {}
+            for name, v in too_small.items():
+                if name in viz["stocks"]:
+                    target = viz["stocks"][name] * v / min_vol
+                    nice = max(np.floor(target * 2) / 2, 0.5) if target >= 1 else round(target, 2)
+                    dilutions[name] = nice
+            if dilutions:
+                extra = sum(
+                    run_sheet[volume_cols[name]] * (viz["stocks"][name] / conc - 1) for name, conc in dilutions.items()
+                )
+                new_ethanol = run_sheet["Ethanol_Vol_uL"] - extra
+                n_neg = int((new_ethanol < 0).sum())
+                change = ", ".join(f"{name} {viz['stocks'][name]:g} → **{conc:g} μg/μL**" for name, conc in dilutions.items())
+                fixes.append(f"**Dilute lipid stocks:** {change}" + (
+                    f" — but {n_neg} run(s) would then run out of ethanol." if n_neg else " — all runs stay feasible."))
+            # Option 2: scale every run up (all volumes grow proportionally)
+            factor = min_vol / min(too_small.values())
+            new_scale = np.ceil(viz["scale_ug"] * factor * 2) / 2
+            fixes.append(f"**Scale up** {viz['na']} per formulation from {viz['scale_ug']:g} to **{new_scale:g} μg** "
+                         f"(uses {new_scale * n_kept:g} μg {viz['na']} in total for one replicate).")
+            
+            smallest_text = ", ".join(f"{name} {v:.2f} μL" for name, v in too_small.items())
+            st.warning(f"⚠️ **{n_low_runs} of {len(run_sheet)} runs need a volume below {min_vol:g} μL** (smallest: {smallest_text}). "
+                       "These are marked ◆ in the composition plot and in the run sheet's `Volume_Check` column.\n\n"
+                       + "\n".join(f"- {f}" for f in fixes))
+        
+        st.caption("📥 To save a chart as SVG, hover over it and click the camera icon in its toolbar.")
+        # Camera icon in each chart's toolbar downloads an SVG (rendered in the browser)
+        svg_config = lambda name: {"toImageButtonOptions": {"format": "svg", "filename": name}, "displaylogo": False}
+        
         col_ternary, col_pairs = st.columns(2)
         
         # ---------- Left: lipid composition on the mixture simplex ----------
         with col_ternary:
             st.markdown("##### Lipid composition (mol %)")
-            peg_values = candidates["PEG_%"].unique()
-            ternary_sum = 100.0 - float(peg_values[0])
+            peg_pct = float(candidates["PEG_%"].iloc[0])
+            ternary_sum = 100.0 - peg_pct
             
-            def ratio_levels(row, status):
-                match = candidates[(candidates[lipids] == row[lipids].values).all(axis=1) & (candidates["status"] == status)]
+            def ratio_levels(row, statuses):
+                match = candidates[(candidates[lipids] == row[lipids].values).all(axis=1) & candidates["status"].isin(statuses)]
                 if ratio_col not in match.columns or match.empty:
                     return ""
                 return ", ".join(f"{v:g}" for v in sorted(match[ratio_col].unique()))
             
             def hover(row):
                 text = (f"Ionizable {row['Ionizable_%']:.2f}% · Helper {row['Helper_%']:.2f}% · "
-                        f"Cholesterol {row['Cholesterol_%']:.2f}% · PEG {100 - ternary_sum:.2f}%")
+                        f"Cholesterol {row['Cholesterol_%']:.2f}% · PEG {peg_pct:.2f}%")
                 if row["n_kept"]:
                     text += f"<br>{row['n_kept']} design point(s)"
-                    levels = ratio_levels(row, "kept")
+                    levels = ratio_levels(row, ["kept", "low"])
                     if levels:
                         text += f" · Ion:{viz['na']} {levels}"
-                dropped = ratio_levels(row, "volume")
+                if row["n_low"]:
+                    levels = ratio_levels(row, ["low"])
+                    text += f"<br>⚠ Volume below {min_vol:g} μL" + (f" at Ion:{viz['na']} {levels}" if levels else "")
+                dropped = ratio_levels(row, ["volume"])
                 if dropped:
                     text += f"<br>Removed (negative ethanol) at Ion:{viz['na']} {dropped}"
                 if row["any_outside"]:
@@ -1212,7 +1326,7 @@ if "run_sheet" in st.session_state:
             compositions["hover"] = compositions.apply(hover, axis=1)
             fig_tern = go.Figure()
             
-            region = feasible_composition_polygon(viz["ranges"], viz["remainder"], viz["constraints"], 100.0 - ternary_sum)
+            region = feasible_composition_polygon(viz["ranges"], viz["remainder"], viz["constraints"], peg_pct)
             if region:
                 closed = region + region[:1]
                 fig_tern.add_trace(go.Scatterternary(
@@ -1222,9 +1336,14 @@ if "run_sheet" in st.session_state:
                 ))
             
             groups = [
-                ("Design point", compositions["n_kept"] > 0, dict(symbol="circle", size=12, color=c_point, line=dict(color=c_surface, width=2))),
-                ("Removed: negative ethanol", (compositions["n_kept"] == 0) & ~compositions["any_outside"], dict(symbol="x-thin", size=10, color=c_excluded, line=dict(color=c_excluded, width=2))),
-                ("Outside composition limits", (compositions["n_kept"] == 0) & compositions["any_outside"], dict(symbol="circle-open", size=9, color=c_excluded, line=dict(width=1.5))),
+                ("Design point", (compositions["n_kept"] > 0) & (compositions["n_low"] == 0),
+                 dict(symbol="circle", size=12, color=c_point, line=dict(color=c_surface, width=2))),
+                (f"⚠ Volume < {min_vol:g} μL", compositions["n_low"] > 0,
+                 dict(symbol="diamond", size=13, color=c_warning, line=dict(color=c_surface, width=2))),
+                ("Removed: negative ethanol", (compositions["n_kept"] == 0) & ~compositions["any_outside"],
+                 dict(symbol="x-thin", size=10, color=c_excluded, line=dict(color=c_excluded, width=2))),
+                ("Outside composition limits", (compositions["n_kept"] == 0) & compositions["any_outside"],
+                 dict(symbol="circle-open", size=9, color=c_excluded, line=dict(width=1.5))),
             ]
             for name, mask, marker in groups:
                 subset = compositions[mask]
@@ -1236,80 +1355,213 @@ if "run_sheet" in st.session_state:
                     text=subset["hover"], hovertemplate="%{text}<extra></extra>"
                 ))
             
-            # Zoom the triangle onto the explored region
-            mins = {c: max(0.0, np.floor((candidates[c].min() - 5) / 5) * 5) for c in lipids}
-            spare = ternary_sum - sum(mins.values())
-            if spare < 10:
+            # FDA-approved formulations as reference stars, rescaled to this design's PEG %
+            references = {}
+            for name, ref in LNP_REFERENCE_FORMULATIONS.items():
+                key = (ref["ion"], ref["helper"], ref["chol"])
+                references.setdefault(key, {"names": [], "peg": ref["peg"]})["names"].append(name)
+            ref_rows = []
+            for (ion, helper, chol), info in references.items():
+                scale = ternary_sum / (ion + helper + chol)
+                ref_rows.append({
+                    "a": ion * scale, "b": helper * scale, "c": chol * scale, "label": " / ".join(info["names"]),
+                    "hover": f"<b>{' / '.join(info['names'])}</b><br>Ionizable {ion}% · Helper {helper}% · "
+                             f"Cholesterol {chol}% · PEG {info['peg']}%",
+                })
+            ref_df = pd.DataFrame(ref_rows)
+            fig_tern.add_trace(go.Scatterternary(
+                a=ref_df["a"], b=ref_df["b"], c=ref_df["c"], mode="markers+text",
+                # Open star so a design point at the same composition stays visible underneath
+                marker=dict(symbol="star-open", size=20, color=c_ink, line=dict(color=c_ink, width=1.5)),
+                text=ref_df["label"], textposition="middle right", textfont=dict(size=11, color=c_ink),
+                customdata=ref_df["hover"], hovertemplate="%{customdata}<extra>FDA-approved</extra>",
+                name="FDA-approved reference"
+            ))
+            
+            # Zoom the triangle onto the explored region (and the references)
+            lows = {c: min(candidates[c].min(), ref_df[k].min()) for c, k in zip(lipids, "abc")}
+            mins = {c: max(0.0, np.floor((lows[c] - 5) / 5) * 5) for c in lipids}
+            if ternary_sum - sum(mins.values()) < 10:
                 mins = {c: 0.0 for c in lipids}
             axis = lambda c: dict(title=dict(text=lipid_labels[c]), min=mins[c], ticksuffix="%", linewidth=1, gridcolor=c_region_line)
             fig_tern.update_layout(
                 ternary=dict(sum=ternary_sum, aaxis=axis("Ionizable_%"), baxis=axis("Helper_%"), caxis=axis("Cholesterol_%")),
-                height=520,
+                height=560,
                 margin=dict(l=50, r=50, t=30, b=40),
                 legend=dict(orientation="h", yanchor="top", y=-0.06, xanchor="center", x=0.5),
             )
-            st.plotly_chart(fig_tern, use_container_width=True)
-            st.caption(f"Each corner direction is one lipid; PEG is fixed at {100 - ternary_sum:.1f}%, so the three shown lipids sum to "
-                       f"{ternary_sum:.1f}%. The shaded area is every composition allowed by the ranges.")
+            st.plotly_chart(fig_tern, use_container_width=True, config=svg_config("design_space_lipid_composition"))
+            st.caption(f"Each corner direction is one lipid; PEG is fixed at {peg_pct:.1f}%, so the three shown lipids sum to "
+                       f"{ternary_sum:.1f}%. The shaded area is every composition allowed by the ranges. "
+                       f"☆ FDA-approved formulations, rescaled to {peg_pct:.1f}% PEG.")
         
-        # ---------- Right: pairwise projections of the independent factors ----------
+        # ---------- Right: response surface fitted to the measured results ----------
         with col_pairs:
-            st.markdown("##### Factor coverage")
-            factors = [f for f in viz["factors"] if f in candidates.columns][:4]
+            st.markdown("##### Response surface")
             label = lambda f: factor_labels.get(f, f)
             
-            if len(factors) < 2:
-                st.info("Pairwise coverage needs at least two independent factors.")
-            else:
-                k = len(factors)
-                fig_pairs = make_subplots(rows=k - 1, cols=k - 1, horizontal_spacing=0.08, vertical_spacing=0.08)
-                for i in range(1, k):
-                    for j in range(i):
-                        xf, yf = factors[j], factors[i]
-                        proj = candidates.groupby([xf, yf], as_index=False).agg(
-                            n_kept=("status", lambda s: int((s == "kept").sum())),
-                            n_total=("status", "size"),
-                        )
-                        kept = proj[proj["n_kept"] > 0]
-                        empty = proj[proj["n_kept"] == 0]
-                        fig_pairs.add_trace(go.Scatter(
-                            x=empty[xf], y=empty[yf], mode="markers",
-                            marker=dict(symbol="circle-open", size=9, color=c_excluded, line=dict(width=1.5)),
-                            name="No design point", legendgroup="empty", showlegend=(i == 1 and j == 0),
-                            hovertemplate=f"{label(xf)} %{{x:.4~g}}<br>{label(yf)} %{{y:.4~g}}<br>No design point<extra></extra>"
-                        ), row=i, col=j + 1)
-                        fig_pairs.add_trace(go.Scatter(
-                            x=kept[xf], y=kept[yf], mode="markers",
-                            marker=dict(size=8 + 3 * np.sqrt(kept["n_kept"]), color=c_point, line=dict(color=c_surface, width=2)),
-                            customdata=kept["n_kept"],
-                            name="Design points", legendgroup="kept", showlegend=(i == 1 and j == 0),
-                            hovertemplate=f"{label(xf)} %{{x:.4~g}}<br>{label(yf)} %{{y:.4~g}}<br>%{{customdata}} design point(s)<extra></extra>"
-                        ), row=i, col=j + 1)
-                        fig_pairs.update_xaxes(title_text=label(xf) if i == k - 1 else None, row=i, col=j + 1)
-                        fig_pairs.update_yaxes(title_text=label(yf) if j == 0 else None, row=i, col=j + 1)
-                # Hide the unused upper-triangle cells
-                for i in range(1, k):
-                    for j in range(i, k - 1):
-                        fig_pairs.update_xaxes(visible=False, row=i, col=j + 1)
-                        fig_pairs.update_yaxes(visible=False, row=i, col=j + 1)
-                fig_pairs.update_xaxes(showgrid=True, gridwidth=1, zeroline=False)
-                fig_pairs.update_yaxes(showgrid=True, gridwidth=1, zeroline=False)
-                fig_pairs.update_layout(
-                    height=520,
-                    margin=dict(l=50, r=20, t=30, b=40),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            observed = run_sheet.copy()
+            observed["Response"] = run_sheet["Run_ID"].map(st.session_state.get("responses", {})).astype(float)
+            factors_in_data = [f for f in viz["factors"] if f in observed.columns]
+            model = fit_response_surface(observed, factors_in_data, viz["ranges"])
+            
+            if model is None or len(model["factors"]) < 2:
+                n_entered = int(observed["Response"].notna().sum())
+                st.info(
+                    "Type measured results in the **✏️ Response** column of the run sheet above (or upload a CSV) to see the fitted response surface. "
+                    f"({n_entered} of {len(run_sheet)} runs have a response; a surface needs at least two varying factors "
+                    "and a few more runs than model terms.)"
                 )
-                st.plotly_chart(fig_pairs, use_container_width=True)
-                note = "Each panel projects the design onto two factors; larger dots = more design points at that spot."
-                if len(viz["factors"]) > 4:
-                    note += " Showing the first 4 factors."
-                st.caption(note)
+            else:
+                fitted = model["factors"]
+                ctrl_x, ctrl_y, ctrl_view = st.columns([1, 1, 1])
+                with ctrl_x:
+                    x_factor = st.selectbox("X axis", fitted, index=0, format_func=label, key="surface_x")
+                with ctrl_y:
+                    y_options = [f for f in fitted if f != x_factor]
+                    y_factor = st.selectbox("Y axis", y_options, index=0, format_func=label, key="surface_y")
+                with ctrl_view:
+                    view = st.radio("View", ["3D surface", "Contour"], horizontal=True, key="surface_view",
+                                    help="Contour downloads as a true vector SVG; the 3D view is embedded as an image.")
+                
+                # Remaining factors are held at one of their tested levels
+                held = {}
+                for f in [f for f in fitted if f not in (x_factor, y_factor)]:
+                    levels = sorted(observed[f].dropna().unique())
+                    held[f] = st.select_slider(f"Hold {label(f)} at", options=levels,
+                                               value=levels[len(levels) // 2], key=f"surface_hold_{f}")
+                
+                # Prediction grid; compositions outside the constraints are left blank
+                gx = np.linspace(*viz["ranges"][x_factor], 80)
+                gy = np.linspace(*viz["ranges"][y_factor], 80)
+                mesh_x, mesh_y = np.meshgrid(gx, gy)
+                grid = pd.DataFrame({x_factor: mesh_x.ravel(), y_factor: mesh_y.ravel(), **{f: v for f, v in held.items()}})
+                for column in COMPOSITION_COLUMNS:
+                    if column not in grid.columns and column != viz["remainder"]:
+                        grid[column] = candidates[column].iloc[0]
+                grid[viz["remainder"]] = 100.0 - grid[[c for c in COMPOSITION_COLUMNS if c != viz["remainder"]]].sum(axis=1)
+                z = model["predict"]({f: grid[f].values for f in fitted})
+                z[~valid_design_mask(grid, viz["constraints"]).values] = np.nan
+                z = z.reshape(mesh_x.shape)
+                
+                # Measured runs that lie on this slice (held factors at the chosen levels)
+                on_slice = observed.dropna(subset=["Response"])
+                for f, v in held.items():
+                    on_slice = on_slice[np.isclose(on_slice[f], v)]
+                
+                response_name = st.session_state.get("response_variable") or "Response"
+                ramp = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+                colorscale = [[i / (len(ramp) - 1), c] for i, c in enumerate(ramp)]
+                point_hover = (f"{label(x_factor)} %{{x:.4~g}}<br>{label(y_factor)} %{{y:.4~g}}<br>"
+                               f"{response_name}: %{{customdata:.4~g}}<extra>Measured</extra>")
+                
+                if view == "3D surface":
+                    fig_surface = go.Figure([
+                        go.Surface(
+                            x=gx, y=gy, z=z, colorscale=colorscale, opacity=0.9,
+                            colorbar=dict(title=dict(text=response_name, side="right"), thickness=12),
+                            contours=dict(z=dict(show=True, usecolormap=True, project=dict(z=True))),
+                            hovertemplate=f"{label(x_factor)} %{{x:.4~g}}<br>{label(y_factor)} %{{y:.4~g}}<br>Predicted %{{z:.4~g}}<extra></extra>",
+                            name="Fitted surface",
+                        ),
+                        go.Scatter3d(
+                            x=on_slice[x_factor], y=on_slice[y_factor], z=on_slice["Response"], customdata=on_slice["Response"],
+                            mode="markers", marker=dict(size=5, color=c_ink, line=dict(color=c_surface, width=2)),
+                            name="Measured", hovertemplate=point_hover,
+                        ),
+                    ])
+                    fig_surface.update_layout(
+                        scene=dict(
+                            xaxis_title=label(x_factor), yaxis_title=label(y_factor), zaxis_title=response_name,
+                            camera=dict(eye=dict(x=1.35, y=-1.35, z=0.85)),
+                            aspectmode="manual", aspectratio=dict(x=1, y=1, z=0.75),
+                        ),
+                        height=560, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
+                    )
+                else:
+                    fig_surface = go.Figure([
+                        go.Contour(
+                            x=gx, y=gy, z=z, colorscale=colorscale, ncontours=12,
+                            contours=dict(showlabels=True, labelfont=dict(size=10, color="#ffffff")),
+                            colorbar=dict(title=dict(text=response_name, side="right"), thickness=12),
+                            hovertemplate=f"{label(x_factor)} %{{x:.4~g}}<br>{label(y_factor)} %{{y:.4~g}}<br>Predicted %{{z:.4~g}}<extra></extra>",
+                            name="Fitted surface",
+                        ),
+                        go.Scatter(
+                            x=on_slice[x_factor], y=on_slice[y_factor], customdata=on_slice["Response"],
+                            mode="markers", marker=dict(size=9, color=c_ink, line=dict(color=c_surface, width=2)),
+                            name="Measured", hovertemplate=point_hover,
+                        ),
+                    ])
+                    fig_surface.update_layout(
+                        xaxis_title=label(x_factor), yaxis_title=label(y_factor),
+                        height=560, margin=dict(l=50, r=20, t=10, b=40), showlegend=False,
+                    )
+                st.plotly_chart(fig_surface, use_container_width=True,
+                                config={**svg_config("design_space_response_surface"), "scrollZoom": False})
+                
+                held_text = "; ".join(f"{label(f)} = {v:g}" for f, v in held.items())
+                st.caption(
+                    f"{model['model']} model fitted to {model['n']} measured runs (R² = {model['r2']:.2f}). "
+                    + (f"Slice at {held_text}. " if held_text else "")
+                    + "Dots are measured runs on this slice; blank areas are compositions outside the ranges."
+                )
+                if model["n"] < 2 * len(model["terms"]):
+                    st.caption(f"⚠ Only {model['n']} runs for {len(model['terms'])} model terms — treat the surface as a rough guide.")
+                
+                # Best predicted formulation over the whole feasible region (all factors, not just this slice)
+                goal = st.segmented_control("Goal", ["Maximize", "Minimize"], default="Maximize", key="surface_goal") or "Maximize"
+                points_per_factor = 11 if len(fitted) <= 4 else 6
+                search = pd.DataFrame(
+                    list(itertools.product(*[np.linspace(*viz["ranges"][f], points_per_factor) for f in fitted])),
+                    columns=fitted,
+                )
+                for column in COMPOSITION_COLUMNS:
+                    if column not in search.columns and column != viz["remainder"]:
+                        search[column] = candidates[column].iloc[0]
+                search[viz["remainder"]] = 100.0 - search[[c for c in COMPOSITION_COLUMNS if c != viz["remainder"]]].sum(axis=1)
+                search = search[valid_design_mask(search, viz["constraints"]).values].copy()
+                search["Predicted"] = model["predict"]({f: search[f].values for f in fitted})
+                best = search.loc[search["Predicted"].idxmax() if goal == "Maximize" else search["Predicted"].idxmin()]
+                measured = observed.dropna(subset=["Response"])
+                best_run = measured.loc[measured["Response"].idxmax() if goal == "Maximize" else measured["Response"].idxmin()]
+                
+                col_pred, col_meas = st.columns(2)
+                with col_pred:
+                    st.metric(f"Predicted best {response_name}", f"{best['Predicted']:.4g}")
+                    st.caption(" · ".join(
+                        [f"{lipid_labels[c]} {best[c]:.1f}%" for c in lipids] + [f"PEG {best['PEG_%']:.1f}%"]
+                        + [f"{label(f)} {best[f]:.3g}" for f in fitted if f not in COMPOSITION_COLUMNS]
+                    ))
+                with col_meas:
+                    st.metric(f"Best measured {response_name}", f"{best_run['Response']:.4g}")
+                    st.caption(f"Run {best_run['Run_ID']} · " + " · ".join(
+                        [f"{lipid_labels[c]} {best_run[c]:.1f}%" for c in lipids]
+                        + [f"{label(f)} {best_run[f]:.3g}" for f in fitted if f not in COMPOSITION_COLUMNS]
+                    ))
+                on_edge = [label(f) for f in fitted if np.isclose(best[f], viz["ranges"][f]).any()]
+                if on_edge:
+                    st.caption(f"The predicted best sits at the edge of the range for {', '.join(on_edge)} — "
+                               "the true optimum may lie outside; consider extending that range in the next round.")
+                
+                with st.expander("Model coefficients (coded units)"):
+                    coef = pd.DataFrame({"Term": model["terms"], "Coefficient": model["coefficients"]})
+                    coef["Term"] = coef["Term"].replace({f: label(f) for f in fitted}, regex=False)
+                    for f in fitted:
+                        coef["Term"] = coef["Term"].str.replace(f, label(f), regex=False)
+                    coef = pd.concat([coef.iloc[:1], coef.iloc[1:].reindex(coef.iloc[1:]["Coefficient"].abs().sort_values(ascending=False).index)])
+                    st.dataframe(coef, hide_index=True, use_container_width=True,
+                                 column_config={"Coefficient": st.column_config.NumberColumn(format="%.3f")})
+                    st.caption("Factors are coded from −1 (low end of range) to +1 (high end), so coefficient sizes are directly "
+                               "comparable: a larger absolute value means a bigger effect on the response.")
     
     st.markdown("---")
     
     st.subheader("💾 Export & Download")
     
-    csv_data = run_sheet.to_csv(index=False)
+    export_sheet = run_sheet.copy()
+    export_sheet[response_variable or "Response"] = run_sheet["Run_ID"].map(st.session_state.get("responses", {}))
+    csv_data = export_sheet.to_csv(index=False)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     col_csv, col_xlsx = st.columns(2)
@@ -1326,7 +1578,7 @@ if "run_sheet" in st.session_state:
     with col_xlsx:
         excel_buffer = BytesIO()
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            run_sheet.to_excel(writer, sheet_name='Run Sheet', index=False)
+            export_sheet.to_excel(writer, sheet_name='Run Sheet', index=False)
             design_display.to_excel(writer, sheet_name='Design Matrix', index=False)
             
             # Get factor ranges for summary
@@ -1352,745 +1604,6 @@ if "run_sheet" in st.session_state:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-    
-    # ========================================================================
-    # DATA INPUT & ANALYSIS SECTION
-    # ========================================================================
-    
-    st.markdown("---")
-    st.subheader("📈 Data Input & Statistical Analysis")
-    
-    with st.expander("📊 Enter Experimental Results & Analyze", expanded=True):
-        st.markdown(f"**Response Variable:** {response_variable}")
-        st.markdown("Enter the measured outcome values for each experimental run below:")
-        
-        # Create data input interface
-        col_input_info, col_input_upload = st.columns([2, 1])
-        
-        with col_input_info:
-            st.info("💡 You can either manually enter values row-by-row, or upload a CSV file with results")
-        
-        with col_input_upload:
-            uploaded_file = st.file_uploader(
-                "Upload results CSV (with 'Response' column)",
-                type=['csv'],
-                key='result_upload'
-            )
-        
-        # Initialize or load response data
-        if "response_data" not in st.session_state:
-            st.session_state.response_data = pd.DataFrame({
-                'Run': range(1, len(run_sheet) + 1),
-                'Response': [None] * len(run_sheet)
-            })
-        
-        # Process uploaded file
-        if uploaded_file is not None:
-            try:
-                uploaded_df = pd.read_csv(uploaded_file)
-                if 'Response' in uploaded_df.columns:
-                    st.session_state.response_data['Response'] = uploaded_df['Response'].values[:len(run_sheet)]
-                    st.success("✅ Data loaded successfully!")
-            except Exception as e:
-                st.error(f"Error loading file: {e}")
-        
-        # Manual data input using editable dataframe
-        st.write("**Enter Response Values:**")
-        response_df = st.data_editor(
-            st.session_state.response_data,
-            use_container_width=True,
-            key='response_editor',
-            hide_index=True,
-            num_rows="fixed"
-        )
-        
-        # Store the response data
-        st.session_state.response_data = response_df
-        
-        # Convert Response column to numeric, handling any string values
-        response_df['Response'] = pd.to_numeric(response_df['Response'], errors='coerce')
-        
-        # Count non-null responses
-        valid_responses = response_df['Response'].dropna()
-        st.info(f"📌 {len(valid_responses)}/{len(run_sheet)} runs have response values entered")
-        
-        # Analysis button
-        col_analyze1, col_analyze2 = st.columns([1, 1])
-        
-        with col_analyze1:
-            analyze_button = st.button("🔍 Perform Statistical Analysis", use_container_width=True)
-        
-        with col_analyze2:
-            export_results = st.button("💾 Export Analysis Results", use_container_width=True)
-        
-        # Perform analysis if button clicked and we have data
-        if analyze_button and len(valid_responses) > 0:
-            st.markdown("---")
-            st.subheader("📊 Analysis Results")
-            
-            # Basic statistics
-            col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
-            
-            with col_stat1:
-                st.metric("Mean Response", f"{valid_responses.mean():.2f}")
-            with col_stat2:
-                st.metric("Std Deviation", f"{valid_responses.std():.2f}")
-            with col_stat3:
-                st.metric("Min Response", f"{valid_responses.min():.2f}")
-            with col_stat4:
-                st.metric("Max Response", f"{valid_responses.max():.2f}")
-            
-            # Merge response data with design data
-            analysis_data = run_sheet.copy()
-            analysis_data['Response'] = response_df['Response'].values
-            
-            st.markdown("---")
-            st.write("**Run Sheet with Response Values:**")
-            
-            # Build column list dynamically based on what exists in the dataframe
-            cols_to_display = []
-            if 'Run_ID' in analysis_data.columns:
-                cols_to_display.append('Run_ID')
-            if 'Ionizable_%' in analysis_data.columns:
-                cols_to_display.append('Ionizable_%')
-            if 'Cholesterol_%' in analysis_data.columns:
-                cols_to_display.append('Cholesterol_%')
-            if 'PEG_%' in analysis_data.columns:
-                cols_to_display.append('PEG_%')
-            if ION_RATIO_COL in analysis_data.columns:
-                cols_to_display.append(ION_RATIO_COL)
-            if 'NP_Ratio' in analysis_data.columns:
-                cols_to_display.append('NP_Ratio')
-            cols_to_display.append('Response')
-            
-            st.dataframe(
-                analysis_data[cols_to_display],
-                use_container_width=True,
-                height=300
-            )
-            
-            st.markdown("---")
-            st.subheader("🔺 Interactive Ternary Plot - Component Ratios vs Response")
-            
-            # Create ternary plot if we have the required components
-            try:
-                if 'Ionizable_%' in analysis_data.columns and 'Cholesterol_%' in analysis_data.columns and 'PEG_%' in analysis_data.columns:
-                    # Prepare data for ternary plot
-                    ternary_data = analysis_data[['Ionizable_%', 'Cholesterol_%', 'PEG_%', 'Response']].copy()
-                    ternary_data = ternary_data.dropna()
-                    
-                    if len(ternary_data) > 0:
-                        # Calculate factor importance (sensitivity analysis)
-                        ionizable_corr = abs(ternary_data['Ionizable_%'].corr(ternary_data['Response']))
-                        chol_corr = abs(ternary_data['Cholesterol_%'].corr(ternary_data['Response']))
-                        peg_corr = abs(ternary_data['PEG_%'].corr(ternary_data['Response']))
-                        
-                        # Normalize importance scores
-                        importance_scores = {
-                            'Ionizable': ionizable_corr,
-                            'Cholesterol': chol_corr,
-                            'PEG': peg_corr
-                        }
-                        total_importance = sum(importance_scores.values())
-                        if total_importance > 0:
-                            importance_pct = {k: (v / total_importance * 100) for k, v in importance_scores.items()}
-                        else:
-                            importance_pct = {k: 0 for k in importance_scores}
-                        
-                        # Find most important factor
-                        most_important = max(importance_scores, key=importance_scores.get)
-                        
-                        # Display factor importance insights
-                        st.markdown("**📊 Factor Importance Analysis:**")
-                        col1, col2, col3 = st.columns(3)
-                        
-                        # Color code factors based on importance
-                        factor_colors = {
-                            'Ionizable': '🔴' if most_important == 'Ionizable' else '⚪',
-                            'Cholesterol': '🔴' if most_important == 'Cholesterol' else '⚪',
-                            'PEG': '🔴' if most_important == 'PEG' else '⚪'
-                        }
-                        
-                        with col1:
-                            st.metric(
-                                f"{factor_colors['Ionizable']} Ionizable Lipid Impact",
-                                f"{importance_pct['Ionizable']:.1f}%",
-                                delta="Most Important" if most_important == 'Ionizable' else None
-                            )
-                        
-                        with col2:
-                            st.metric(
-                                f"{factor_colors['Cholesterol']} Cholesterol Impact",
-                                f"{importance_pct['Cholesterol']:.1f}%",
-                                delta="Most Important" if most_important == 'Cholesterol' else None
-                            )
-                        
-                        with col3:
-                            st.metric(
-                                f"{factor_colors['PEG']} PEG Impact",
-                                f"{importance_pct['PEG']:.1f}%",
-                                delta="Most Important" if most_important == 'PEG' else None
-                            )
-                        
-                        st.markdown(f"""
-                        **Key Finding:** **{most_important}** is the most critical factor, with **{importance_pct[most_important]:.1f}%** 
-                        of the correlation strength with {response_variable}. This factor should be prioritized in optimization.
-                        """)
-                        
-                        st.markdown("---")
-                        st.markdown("""
-                        **📍 Interactive Ternary Plot - Component Ratios vs Response**
-                        - 🖱️ **Hover**: See detailed information for each run
-                        - 🔍 **Zoom**: Click and drag to zoom into regions of interest
-                        - 📍 **Pan**: Scroll to move around the plot
-                        - 💾 **Save**: Download the plot as PNG from the toolbar
-                        """)
-                        
-                        # Prepare data for interactive Plotly ternary plot
-                        values = ternary_data['Response'].values
-                        
-                        # Normalize values for color mapping (0-1 range)
-                        if len(values) > 0 and (values.max() - values.min()) > 0:
-                            values_normalized = (values - values.min()) / (values.max() - values.min())
-                        else:
-                            values_normalized = np.ones_like(values) * 0.5
-                        
-                        # Create color scale based on RdYlGn (Red=High, Yellow=Mid, Green=Low)
-                        # Reverse it so red is high response
-                        colorscale = [
-                            [0.0, '#1a9850'],    # Green (low)
-                            [0.5, '#ffffbf'],    # Yellow (mid)
-                            [1.0, '#d73027']     # Red (high)
-                        ]
-                        
-                        # Create hover text with rich information
-                        hover_texts = []
-                        for idx, row in ternary_data.iterrows():
-                            helper_pct = 100.0 - row['Ionizable_%'] - row['Cholesterol_%'] - row['PEG_%']
-                            hover_text = (
-                                f"<b>Run #{idx + 1}</b><br>"
-                                f"<b>Component Ratios:</b><br>"
-                                f"  • Ionizable: {row['Ionizable_%']:.1f}%<br>"
-                                f"  • Cholesterol: {row['Cholesterol_%']:.1f}%<br>"
-                                f"  • PEG: {row['PEG_%']:.1f}%<br>"
-                                f"  • Helper: {helper_pct:.1f}%<br>"
-                                f"<b>Response:</b> {row['Response']:.2f}<br>"
-                                f"<i>Click for more details</i>"
-                            )
-                            hover_texts.append(hover_text)
-                        
-                        # Create Plotly ternary plot
-                        fig_ternary = go.Figure(data=[go.Scatterternary(
-                            a=ternary_data['Ionizable_%'].values,
-                            b=ternary_data['Cholesterol_%'].values,
-                            c=ternary_data['PEG_%'].values,
-                            mode='markers+text',
-                            marker=dict(
-                                size=8 + (values_normalized * 12),  # Size varies with response
-                                color=values,  # Color based on response value
-                                colorscale=colorscale,
-                                showscale=True,
-                                colorbar=dict(
-                                    title=f"<b>{response_variable}</b>",
-                                    thickness=15,
-                                    len=0.7,
-                                    x=1.02
-                                ),
-                                line=dict(color='rgba(26, 26, 26, 0.8)', width=1.5),
-                                opacity=0.85
-                            ),
-                            text=[f"{v:.0f}" for v in values],
-                            textposition="middle center",
-                            textfont=dict(size=8, color='white', family='monospace'),
-                            hovertext=hover_texts,
-                            hoverinfo='text',
-                            customdata=np.arange(len(ternary_data)),
-                        )])
-                        
-                        # Update layout for better appearance
-                        fig_ternary.update_layout(
-                            title=dict(
-                                text=f"<b>Component Mixture Design - {response_variable} Response Surface</b><br>" +
-                                     f"<sub>Most Important Factor: <span style='color:#d32f2f'>{most_important}</span></sub>",
-                                font=dict(size=16, color='#1a1a1a', family='sans-serif'),
-                                x=0.5,
-                                xanchor='center'
-                            ),
-                            ternary=dict(
-                                sum=100,
-                                aaxis=dict(
-                                    title="Ionizable Lipid %",
-                                    min=0.01,
-                                    linewidth=2,
-                                    ticks='outside',
-                                    tickfont=dict(size=11, color='#1a1a1a')
-                                ),
-                                baxis=dict(
-                                    title="Cholesterol %",
-                                    min=0.01,
-                                    linewidth=2,
-                                    ticks='outside',
-                                    tickfont=dict(size=11, color='#1a1a1a')
-                                ),
-                                caxis=dict(
-                                    title="PEG %",
-                                    min=0.01,
-                                    linewidth=2,
-                                    ticks='outside',
-                                    tickfont=dict(size=11, color='#1a1a1a')
-                                ),
-                                bgcolor='rgba(240, 240, 245, 0.5)'
-                            ),
-                            hovermode='closest',
-                            height=700,
-                            margin=dict(l=80, r=150, t=120, b=80),
-                            paper_bgcolor='white',
-                            plot_bgcolor='white',
-                            font=dict(family='sans-serif', size=11, color='#1a1a1a'),
-                            showlegend=False
-                        )
-                        
-                        # Add annotations for factor importance
-                        fig_ternary.add_annotation(
-                            text=f"<b>Factor Importance Rankings:</b><br>" +
-                                 f"1️⃣ {most_important}: {importance_pct[most_important]:.1f}%<br>" +
-                                 f"2️⃣ {[k for k in importance_pct.keys() if k != most_important][0]}: {importance_pct[[k for k in importance_pct.keys() if k != most_important][0]]:.1f}%<br>" +
-                                 f"3️⃣ {[k for k in importance_pct.keys() if k != most_important][1]}: {importance_pct[[k for k in importance_pct.keys() if k != most_important][1]]:.1f}%",
-                            xref='paper', yref='paper',
-                            x=0.02, y=0.98,
-                            showarrow=False,
-                            bgcolor='rgba(255, 255, 255, 0.9)',
-                            bordercolor='#d32f2f',
-                            borderwidth=2,
-                            borderpad=10,
-                            font=dict(size=10, family='monospace'),
-                            align='left',
-                            xanchor='left',
-                            yanchor='top'
-                        )
-                        
-                        st.plotly_chart(fig_ternary, use_container_width=True, height=700)
-                        
-                        # Display additional insights
-                        st.markdown("**📈 Response Statistics:**")
-                        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-                        with stats_col1:
-                            st.metric("Max Response", f"{values.max():.2f}", delta_color="off")
-                        with stats_col2:
-                            st.metric("Min Response", f"{values.min():.2f}", delta_color="off")
-                        with stats_col3:
-                            st.metric("Mean Response", f"{values.mean():.2f}", delta_color="off")
-                        with stats_col4:
-                            st.metric("Std Dev", f"{values.std():.2f}", delta_color="off")
-                        
-                    else:
-                        st.warning("No valid data for ternary plot")
-                else:
-                    st.info("Ternary plot requires Ionizable, Cholesterol, and PEG components in the design")
-            except Exception as e:
-                st.warning(f"Could not create ternary plot: {e}")
-                import traceback
-                st.error(traceback.format_exc())
-            
-            st.markdown("---")
-            st.subheader("📊 Comprehensive Factor Analysis & Optimization Summary")
-            
-            # Paper-based guidance
-            st.markdown("""
-            ### Key Findings from Literature Analysis:
-            1. **In Vitro ≠ In Vivo Efficacy**: Transfection efficiency observed in cell culture does NOT correlate with animal model performance
-            2. **Special Cubic Model Required**: Lipid component effects are non-additive (interaction terms A×B×C are essential)
-            3. **PEG Paradox**: Higher PEG reduces particle size but **significantly decreases both pDNA and siRNA efficacy**
-            4. **Recommended pDNA Formulation**: DLin-KC2-DMA : DOPE : Cholesterol : C16-PEG2000 = **39:10:50:1** (mol%)
-            5. **Key Difference**: pDNA prefers **low PEG (1%)** while delivery performance is highly sensitive to cholesterol
-            """)
-            
-            # Create comprehensive analysis panel
-            try:
-                if len(valid_responses) > 0 and len(analysis_data) > 0:
-                    # Prepare data for analysis
-                    analysis_clean = analysis_data.copy()
-                    for col in ['Ionizable_%', 'Cholesterol_%', 'PEG_%', 'Helper_%', ION_RATIO_COL]:
-                        if col in analysis_clean.columns:
-                            analysis_clean[col] = pd.to_numeric(analysis_clean[col], errors='coerce')
-                    analysis_clean['Response'] = pd.to_numeric(analysis_clean['Response'], errors='coerce')
-                    analysis_clean = analysis_clean.dropna()
-                    
-                    if len(analysis_clean) > 0:
-                        # ============ PANEL 1: Factor Importance Ranking ============
-                        st.markdown("### 1️⃣ Factor Importance Ranking")
-                        
-                        st.markdown(
-                            "💡 **Paper Finding**: These linear correlations give first-order approximation, "
-                            "but the true model requires **Special Cubic interactions** (A×B×C terms) "
-                            "to capture non-additive lipid synergistic effects."
-                        )
-                        
-                        # Calculate correlations for all factors (excluding PEG since it's fixed)
-                        factor_correlations = {}
-                        factor_names_display = {}
-                        
-                        if 'Ionizable_%' in analysis_clean.columns:
-                            ion_corr = analysis_clean['Ionizable_%'].corr(analysis_clean['Response'])
-                            factor_correlations['Ionizable Lipid %'] = abs(ion_corr)
-                            factor_names_display['Ionizable Lipid %'] = 'Ionizable_%'
-                        
-                        if 'Cholesterol_%' in analysis_clean.columns:
-                            chol_corr = analysis_clean['Cholesterol_%'].corr(analysis_clean['Response'])
-                            factor_correlations['Cholesterol %'] = abs(chol_corr)
-                            factor_names_display['Cholesterol %'] = 'Cholesterol_%'
-                        
-                        if 'Helper_%' in analysis_clean.columns:
-                            helper_corr = analysis_clean['Helper_%'].corr(analysis_clean['Response'])
-                            factor_correlations['Helper Lipid %'] = abs(helper_corr)
-                            factor_names_display['Helper Lipid %'] = 'Helper_%'
-                        
-                        if ION_RATIO_COL in analysis_clean.columns:
-                            ion_dna_corr = analysis_clean[ION_RATIO_COL].corr(analysis_clean['Response'])
-                            factor_correlations[f'Ion:{na} Ratio'] = abs(ion_dna_corr)
-                            factor_names_display[f'Ion:{na} Ratio'] = ION_RATIO_COL
-                        
-                        # Note: PEG is excluded because it's fixed at 1.5%
-                        
-                        # Sort by importance
-                        sorted_factors = sorted(factor_correlations.items(), key=lambda x: x[1], reverse=True)
-                        factor_names_sorted = [f[0] for f in sorted_factors]
-                        factor_values_sorted = [f[1] for f in sorted_factors]
-                        
-                        # Normalize to 0-100 scale
-                        if max(factor_values_sorted) > 0:
-                            factor_importance_pct = [v / max(factor_values_sorted) * 100 for v in factor_values_sorted]
-                        else:
-                            factor_importance_pct = [0] * len(factor_values_sorted)
-                        
-                        # Create bar chart
-                        fig_importance = go.Figure(data=[
-                            go.Bar(
-                                y=factor_names_sorted,
-                                x=factor_importance_pct,
-                                orientation='h',
-                                marker=dict(
-                                    color=factor_importance_pct,
-                                    colorscale='RdYlGn_r',
-                                    showscale=False,
-                                    line=dict(color='#1a1a1a', width=1.5)
-                                ),
-                                text=[f'{v:.1f}%' for v in factor_importance_pct],
-                                textposition='outside',
-                                hovertemplate='<b>%{y}</b><br>Importance: %{x:.1f}%<extra></extra>'
-                            )
-                        ])
-                        
-                        fig_importance.update_layout(
-                            title='<b>Factor Importance Scores</b><br><sub>Relative importance for response optimization</sub>',
-                            xaxis_title='Importance Score (%)',
-                            yaxis_title='',
-                            height=350,
-                            margin=dict(l=150, r=80, t=100, b=50),
-                            showlegend=False,
-                            font=dict(size=11),
-                            paper_bgcolor='white',
-                            plot_bgcolor='#f8f9fa'
-                        )
-                        
-                        st.plotly_chart(fig_importance, use_container_width=True)
-                        
-                        # ============ PANEL 2: Main Effects Plots ============
-                        st.markdown("### 2️⃣ Factor Main Effects (Influence on Response)")
-                        
-                        num_factors_to_display = min(4, len(factor_names_sorted))
-                        fig_main_effects = make_subplots(
-                            rows=2, cols=2,
-                            subplot_titles=[name for name in factor_names_sorted[:4]],
-                            specs=[[{'type': 'scatter'}, {'type': 'scatter'}],
-                                   [{'type': 'scatter'}, {'type': 'scatter'}]],
-                            horizontal_spacing=0.15,
-                            vertical_spacing=0.15
-                        )
-                        
-                        colors_gradient = ['#d73027', '#fc8d59', '#fee090', '#e0f3f8', '#91bfdb', '#4575b4']
-                        
-                        for idx, factor_name in enumerate(factor_names_sorted[:4]):
-                            row = idx // 2 + 1
-                            col = idx % 2 + 1
-                            factor_col = factor_names_display.get(factor_name)
-                            
-                            if factor_col and factor_col in analysis_clean.columns:
-                                # Sort data for line plot
-                                plot_data = analysis_clean[[factor_col, 'Response']].sort_values(by=factor_col)
-                                
-                                fig_main_effects.add_trace(
-                                    go.Scatter(
-                                        x=plot_data[factor_col],
-                                        y=plot_data['Response'],
-                                        mode='markers+lines',
-                                        name=factor_name,
-                                        marker=dict(
-                                            size=8,
-                                            color=plot_data['Response'],
-                                            colorscale='RdYlGn',
-                                            showscale=False,
-                                            line=dict(color='white', width=1)
-                                        ),
-                                        line=dict(color='rgba(0,0,0,0.3)', width=2),
-                                        hovertemplate=f'<b>{factor_name}</b>: %{{x:.2f}}<br>' +
-                                                     f'{response_variable}: %{{y:.2f}}<extra></extra>'
-                                    ),
-                                    row=row, col=col
-                                )
-                                
-                                fig_main_effects.update_xaxes(title_text=factor_name, row=row, col=col, title_font=dict(size=10))
-                                if col == 1:
-                                    fig_main_effects.update_yaxes(title_text=response_variable, row=row, col=col, title_font=dict(size=10))
-                        
-                        fig_main_effects.update_layout(
-                            title='<b>Main Effects on Response</b><br><sub>How each factor individually affects the outcome</sub>',
-                            height=600,
-                            showlegend=False,
-                            font=dict(size=10),
-                            paper_bgcolor='white',
-                            plot_bgcolor='#f8f9fa'
-                        )
-                        
-                        st.plotly_chart(fig_main_effects, use_container_width=True)
-                        
-                        # ============ PANEL 3: Optimal Formulation Prediction ============
-                        st.markdown("### 3️⃣ 🎯 Optimal Formulation Prediction")
-                        
-                        st.warning(
-                            "⚠️ **Important**: This is based on observed data, not a predictive model. "
-                            "For reliable in vivo predictions, model should have ±25% error tolerance. "
-                            "Always validate with independent experiments!"
-                        )
-                        
-                        # Find best run
-                        best_idx = analysis_clean['Response'].idxmax()
-                        best_response = analysis_clean['Response'].max()
-                        
-                        # Prepare optimal formulation
-                        optimal_formulation = {}
-                        pred_confidence = 0
-                        
-                        if 'Ionizable_%' in analysis_clean.columns:
-                            optimal_formulation['Ionizable Lipid %'] = analysis_clean.loc[best_idx, 'Ionizable_%']
-                        
-                        if 'Cholesterol_%' in analysis_clean.columns:
-                            optimal_formulation['Cholesterol %'] = analysis_clean.loc[best_idx, 'Cholesterol_%']
-                        
-                        if 'PEG_%' in analysis_clean.columns:
-                            optimal_formulation['PEG %'] = analysis_clean.loc[best_idx, 'PEG_%']
-                        
-                        if ION_RATIO_COL in analysis_clean.columns:
-                            optimal_formulation[f'Ion:{na} Ratio'] = analysis_clean.loc[best_idx, ION_RATIO_COL]
-                        
-                        # Calculate Helper %
-                        ion_val = optimal_formulation.get('Ionizable Lipid %', 0)
-                        chol_val = optimal_formulation.get('Cholesterol %', 0)
-                        peg_val = optimal_formulation.get('PEG %', 1.5)
-                        helper_val = max(0, 100.0 - ion_val - chol_val - peg_val)
-                        optimal_formulation['Helper Lipid %'] = helper_val
-                        
-                        # Calculate confidence based on response distribution
-                        response_std = analysis_clean['Response'].std()
-                        response_mean = analysis_clean['Response'].mean()
-                        if response_std > 0:
-                            pred_confidence = min(100, ((best_response - response_mean) / response_std) * 15 + 70)
-                        else:
-                            pred_confidence = 85
-                        
-                        # Display optimal formulation in cards
-                        st.markdown("**📍 Predicted Optimal Formulation:**")
-                        
-                        opt_col1, opt_col2, opt_col3 = st.columns([2, 2, 1])
-                        
-                        with opt_col1:
-                            st.markdown("**Component Ratios (Molar %):**")
-                            for component, value in optimal_formulation.items():
-                                st.write(f"  • **{component}**: `{value:.2f}%`")
-                        
-                        with opt_col2:
-                            st.markdown("**Expected Performance:**")
-                            st.metric(f"Peak {response_variable}", f"{best_response:.2f}", 
-                                     delta=f"+{best_response - response_mean:.2f} vs. mean")
-                            st.metric("Confidence Level", f"{pred_confidence:.0f}%",
-                                     delta="High" if pred_confidence > 80 else "Medium")
-                        
-                        with opt_col3:
-                            st.markdown("**Statistics:**")
-                            st.write(f"Based on **{len(analysis_clean)}** runs")
-                            st.write(f"Mean: `{response_mean:.2f}`")
-                            st.write(f"Std Dev: `{response_std:.2f}`")
-                        
-                        # ============ PANEL 4: Optimization Recommendations ============
-                        st.markdown("### 4️⃣ 💡 Optimization Recommendations (Based on Paper Findings)")
-                        
-                        # Provide actionable insights
-                        recommendations = []
-                        
-                        # PEG warning based on paper findings
-                        if 'PEG_%' in analysis_clean.columns:
-                            peg_in_optimal = optimal_formulation.get('PEG %', 1.5)
-                            if peg_in_optimal > 2.0:
-                                recommendations.append(
-                                    f"⚠️ **PEG Alert**: Your optimal formulation has {peg_in_optimal:.1f}% PEG. "
-                                    f"**Paper strongly recommends 1% PEG** for in vivo delivery. "
-                                    f"High PEG significantly reduces transfection efficacy!"
-                                )
-                        
-                        # Check top factors
-                        if len(sorted_factors) > 0:
-                            top_factor = sorted_factors[0][0]
-                            top_importance = sorted_factors[0][1]
-                            
-                            recommendations.append(
-                                f"🎯 **Priority Factor**: {top_factor} is the most critical ({factor_importance_pct[0]:.0f}% importance). "
-                                f"Focus optimization efforts on this factor."
-                            )
-                        
-                        # Check response trend
-                        if len(sorted_factors) > 1:
-                            second_factor = sorted_factors[1][0]
-                            recommendations.append(
-                                f"📈 **Secondary Factor**: {second_factor} ({factor_importance_pct[1]:.0f}% importance) should be considered "
-                                f"as a secondary optimization target."
-                            )
-                        
-                        # Suggest next steps based on confidence
-                        if pred_confidence < 75:
-                            recommendations.append(
-                                "⚠️ **Low Confidence Alert**: Consider running more experiments around the optimal region "
-                                "to improve confidence in the prediction."
-                            )
-                        elif pred_confidence > 85:
-                            recommendations.append(
-                                "✅ **High Confidence**: The predicted formulation is strongly supported by the data. "
-                                "Proceed with validation studies."
-                            )
-                        
-                        # Response variability check
-                        cv = (response_std / response_mean * 100) if response_mean > 0 else 0
-                        if cv > 30:
-                            recommendations.append(
-                                f"🔍 **High Variability**: Response variation is {cv:.1f}%. "
-                                "Check for experimental noise or identify additional controlling factors."
-                            )
-                        
-                        # Display recommendations
-                        for i, rec in enumerate(recommendations, 1):
-                            st.markdown(f"**{i}.** {rec}")
-                        
-                        # ============ PANEL 5: Interaction Analysis (if available) ============
-                        if len(factor_names_sorted) >= 2:
-                            st.markdown("### 5️⃣ 🔗 Factor Interactions (2D Response Maps)")
-                            
-                            # Create heatmaps for top 2 factor combinations
-                            factor1_col = factor_names_display.get(factor_names_sorted[0])
-                            factor2_col = factor_names_display.get(factor_names_sorted[1])
-                            
-                            if factor1_col and factor2_col and factor1_col in analysis_clean.columns and factor2_col in analysis_clean.columns:
-                                # Create 2D heatmap
-                                pivot_data = analysis_clean.pivot_table(
-                                    values='Response',
-                                    index=factor2_col,
-                                    columns=factor1_col,
-                                    aggfunc='mean'
-                                )
-                                
-                                if pivot_data is not None and not pivot_data.empty:
-                                    fig_heatmap = go.Figure(data=go.Heatmap(
-                                        z=pivot_data.values,
-                                        x=pivot_data.columns,
-                                        y=pivot_data.index,
-                                        colorscale='RdYlGn',
-                                        text=np.round(pivot_data.values, 1),
-                                        texttemplate='%{text:.1f}',
-                                        textfont={"size": 9},
-                                        colorbar=dict(title=response_variable),
-                                        hovertemplate='<b>%{x:.2f}</b> - <b>%{y:.2f}</b><br>' +
-                                                     f'{response_variable}: %{{z:.2f}}<extra></extra>'
-                                    ))
-                                    
-                                    fig_heatmap.update_layout(
-                                        title=f'<b>Interaction: {factor_names_sorted[0]} vs {factor_names_sorted[1]}</b><br>' +
-                                              '<sub>Response values at different factor combinations</sub>',
-                                        xaxis_title=factor_names_sorted[0],
-                                        yaxis_title=factor_names_sorted[1],
-                                        height=450,
-                                        font=dict(size=11),
-                                        paper_bgcolor='white'
-                                    )
-                                    
-                                    st.plotly_chart(fig_heatmap, use_container_width=True)
-                        
-                        # ============ EXPORT OPTIMAL FORMULATION ============
-                        st.markdown("---")
-                        st.markdown("### 📥 Export Optimization Results")
-                        
-                        col_export1, col_export2 = st.columns(2)
-                        
-                        with col_export1:
-                            if st.button("📋 Copy Optimal Formulation", key="copy_optimal"):
-                                optimal_text = "Optimal LNP Formulation:\n" + "\n".join(
-                                    [f"  {k}: {v:.2f}%" if '%' in k else f"  {k}: {v:.2f}" 
-                                     for k, v in optimal_formulation.items()]
-                                )
-                                optimal_text += f"\n\nExpected {response_variable}: {best_response:.2f}\nConfidence: {pred_confidence:.0f}%"
-                                st.code(optimal_text)
-                        
-                        with col_export2:
-                            # Prepare download data
-                            export_data = pd.DataFrame({
-                                'Component': list(optimal_formulation.keys()),
-                                'Value': list(optimal_formulation.values()),
-                                'Unit': ['%', '%', '%', '%', '%'] if len(optimal_formulation) >= 5 else ['%'] * len(optimal_formulation),
-                                'Performance': [best_response] + ['' for _ in range(len(optimal_formulation)-1)],
-                                'Confidence': [f"{pred_confidence:.0f}%"] + ['' for _ in range(len(optimal_formulation)-1)]
-                            })
-                            
-                            csv_buffer = export_data.to_csv(index=False)
-                            st.download_button(
-                                label="📊 Download Optimization Report",
-                                data=csv_buffer,
-                                file_name="optimal_formulation.csv",
-                                mime="text/csv",
-                                key="download_optimal"
-                            )
-                    
-            except Exception as e:
-                st.warning(f"Could not complete factor analysis: {e}")
-            
-            # Export results
-            if export_results and len(valid_responses) > 0:
-                # Create comprehensive analysis report
-                analysis_output = run_sheet.copy()
-                analysis_output['Response'] = valid_responses.values
-                
-                export_buffer = BytesIO()
-                with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
-                    analysis_output.to_excel(writer, sheet_name='Results', index=False)
-                    
-                    # Statistics summary
-                    stats_summary = pd.DataFrame({
-                        'Metric': ['Mean', 'Std Dev', 'Min', 'Max', 'Range', 'Count'],
-                        'Value': [
-                        valid_responses.mean(),
-                        valid_responses.std(),
-                        valid_responses.min(),
-                        valid_responses.max(),
-                        valid_responses.max() - valid_responses.min(),
-                        len(valid_responses)
-                    ]
-                    })
-                    stats_summary.to_excel(writer, sheet_name='Statistics', index=False)
-                
-                export_buffer.seek(0)
-                st.download_button(
-                    label="📥 Download Analysis Report",
-                    data=export_buffer.getvalue(),
-                    file_name=f"DOE_Analysis_{timestamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
 
 else:
     st.info("👈 **Start with STAGE 1: PLANNING** - Define your DOE objective, response variable, and components to begin the DOE workflow.")
